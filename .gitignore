@@ -1,0 +1,17 @@
+# Entorno virtual
+.env
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs locales
+logs/
+*.log
+
+# Docker
+.docker/
+
+# IDEs
+.vscode/
+.idea/
