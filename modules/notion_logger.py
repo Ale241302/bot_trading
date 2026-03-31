@@ -1,10 +1,10 @@
 """
 notion_logger.py
-────────────────────────────────────────────
+================================================
 Modulo de registro en Notion.
 Escribe cada operacion como fila en la DB
 y lee el historial para darselo como contexto a la IA.
-────────────────────────────────────────────
+================================================
 """
 
 import os
@@ -31,14 +31,14 @@ class NotionLogger:
         title = f"{action} {symbol} @ {price_open} | {datetime.now().strftime('%Y-%m-%d %H:%M')}"
 
         properties = {
-            "Operacion":            {"title":      [{"text": {"content": title}}]},
-            "Fecha":                {"date":       {"start": now}},
-            "Tipo":                 {"select":     {"name": action}},
-            "Par":                  {"rich_text":  [{"text": {"content": symbol}}]},
-            "Cantidad (Lotes)":     {"number":     lot_size},
-            "Precio Entrada":       {"number":     price_open},
-            "Motivo / Analisis IA": {"rich_text":  [{"text": {"content": reason}}]},
-            "Estado":               {"select":     {"name": status}},
+            "Operaci\u00f3n":              {"title":     [{"text": {"content": title}}]},
+            "Fecha":                   {"date":      {"start": now}},
+            "Tipo":                    {"select":    {"name": action}},
+            "Par":                     {"rich_text": [{"text": {"content": symbol}}]},
+            "Cantidad (Lotes)":        {"number":    lot_size},
+            "Precio Entrada":          {"number":    price_open},
+            "Motivo / An\u00e1lisis IA": {"rich_text": [{"text": {"content": reason}}]},
+            "Estado":                  {"select":    {"name": status}},
         }
 
         if price_close is not None:
@@ -64,11 +64,11 @@ class NotionLogger:
             props = page["properties"]
             try:
                 operations.append({
-                    "date":   props["Fecha"]["date"]["start"][:10]                          if props["Fecha"]["date"] else "",
-                    "type":   props["Tipo"]["select"]["name"]                               if props["Tipo"]["select"] else "",
-                    "symbol": props["Par"]["rich_text"][0]["text"]["content"]               if props["Par"]["rich_text"] else "",
-                    "result": props["Resultado (USD)"]["number"]                            if props["Resultado (USD)"]["number"] is not None else 0,
-                    "reason": props["Motivo / Analisis IA"]["rich_text"][0]["text"]["content"] if props["Motivo / Analisis IA"]["rich_text"] else ""
+                    "date":   props["Fecha"]["date"]["start"][:10]                                       if props["Fecha"]["date"] else "",
+                    "type":   props["Tipo"]["select"]["name"]                                            if props["Tipo"]["select"] else "",
+                    "symbol": props["Par"]["rich_text"][0]["text"]["content"]                            if props["Par"]["rich_text"] else "",
+                    "result": props["Resultado (USD)"]["number"]                                         if props["Resultado (USD)"]["number"] is not None else 0,
+                    "reason": props["Motivo / An\u00e1lisis IA"]["rich_text"][0]["text"]["content"]        if props["Motivo / An\u00e1lisis IA"]["rich_text"] else ""
                 })
             except Exception:
                 continue

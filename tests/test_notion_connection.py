@@ -25,9 +25,6 @@ load_dotenv()
 from notion_client import Client
 from modules.notion_logger import NotionLogger
 
-# ------------------------------------------------
-# Colores para la consola
-# ------------------------------------------------
 GREEN  = "\033[92m"
 RED    = "\033[91m"
 YELLOW = "\033[93m"
@@ -37,7 +34,7 @@ def ok(msg):   print(f"{GREEN}  [PASS]{RESET} {msg}")
 def fail(msg): print(f"{RED}  [FAIL]{RESET} {msg}")
 def info(msg): print(f"{YELLOW}  [INFO]{RESET} {msg}")
 
-TEST_PAGE_ID = None  # guarda el ID del registro de prueba para eliminarlo al final
+TEST_PAGE_ID = None
 
 
 def test_token_valid():
@@ -49,7 +46,6 @@ def test_token_valid():
 
     client = Client(auth=token)
     try:
-        # Una llamada simple para verificar que el token es valido
         result = client.users.me()
         ok(f"Token valido | Bot: {result.get('name', 'N/A')} | Tipo: {result.get('type', 'N/A')}")
     except Exception as e:
@@ -83,7 +79,6 @@ def test_write_operation():
 
     logger = NotionLogger()
     try:
-        # Llamamos directamente al cliente para capturar el ID de la pagina creada
         from datetime import datetime, timezone
         now   = datetime.now(timezone.utc).isoformat()
         title = f"[TEST] BUY EURUSD @ 1.08500 | {datetime.now().strftime('%Y-%m-%d %H:%M')}"
@@ -91,16 +86,16 @@ def test_write_operation():
         response = logger.client.pages.create(
             parent={"database_id": logger.db_id},
             properties={
-                "Operacion":            {"title":     [{"text": {"content": title}}]},
-                "Fecha":                {"date":      {"start": now}},
-                "Tipo":                 {"select":    {"name": "BUY"}},
-                "Par":                  {"rich_text": [{"text": {"content": "EURUSD"}}]},
-                "Cantidad (Lotes)":     {"number":    0.01},
-                "Precio Entrada":       {"number":    1.08500},
-                "Motivo / Analisis IA": {"rich_text": [{"text": {"content": "[PRUEBA] Tendencia alcista detectada en M15. Volumen creciente."}}]},
-                "Estado":               {"select":    {"name": "Cerrada"}},
-                "Precio Cierre":        {"number":    1.08700},
-                "Resultado (USD)":      {"number":    20.0},
+                "Operaci\u00f3n":              {"title":     [{"text": {"content": title}}]},
+                "Fecha":                   {"date":      {"start": now}},
+                "Tipo":                    {"select":    {"name": "BUY"}},
+                "Par":                     {"rich_text": [{"text": {"content": "EURUSD"}}]},
+                "Cantidad (Lotes)":        {"number":    0.01},
+                "Precio Entrada":          {"number":    1.08500},
+                "Motivo / An\u00e1lisis IA": {"rich_text": [{"text": {"content": "[PRUEBA] Tendencia alcista detectada en M15. Volumen creciente."}}]},
+                "Estado":                  {"select":    {"name": "Cerrada"}},
+                "Precio Cierre":           {"number":    1.08700},
+                "Resultado (USD)":         {"number":    20.0},
             }
         )
         TEST_PAGE_ID = response["id"]
