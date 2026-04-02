@@ -3,22 +3,22 @@ market_context.py
 ================================================
 Contexto externo de mercado — Estrategia ASM
 
-Fuentes:
-  1. Finnhub (finnhub-client)  → señales técnicas M1 (RSI, MACD, resumen)
-  2. jb-news (PyPI oficial)    → calendario económico con Outcome/Strength/Quality
-                                  + ML predictions y GPT sentiment
+Fuentes (todas FREE):
+  1. Finnhub          → /forex/candle  + /indicator (RSI, MACD) + /calendar/economic
+  2. Myfxbook         → Community Outlook (% long/short) — sin API key
+  3. jblanked         → calendario MQL5 + ForexFactory (sin key en FF)
+  4. Alpha Vantage    → FX_INTRADAY velas backup + NEWS_SENTIMENT
 
 Salidas públicas:
   get_context_text()   → str  : bloque completo para inyectar en el prompt
-  should_hold_news()   → (bool, str): ¿bloquear por noticia de alto impacto?
+  should_hold_news()   → (bool, str): bloquear por noticia de alto impacto
 ================================================
 """
 
 import os
+import requests
 from datetime import datetime, timezone, timedelta
-from typing import Optional
 
-# ── Imports condicionales (si la librería no está, el módulo degrada gracefully) ──
 try:
     import finnhub
     FINNHUB_OK = True
@@ -26,46 +26,37 @@ except ImportError:
     FINNHUB_OK = False
 
 try:
-    from jb_news import JBNews          # pip install jb-news
+    from jb_news import JBNews
     JBNEWS_OK = True
 except ImportError:
     JBNEWS_OK = False
 
-import requests  # fallback para cualquier llamada HTTP directa
-
 
 class MarketContext:
-    """
-    Obtiene y formatea contexto externo de mercado en cada ciclo del bot.
-    Si alguna fuente no está disponible (sin key o error de red),
-    el módulo continúa operando con las fuentes disponibles.
-    """
-
-    # Bloquear operaciones si hay evento HIGH en los próximos N minutos
     NEWS_BLOCK_MINUTES = 30
-
-    # Símbolo Finnhub para EURUSD Forex (OANDA feed)
-    FINNHUB_SYMBOL = "OANDA:EUR_USD"
+    FINNHUB_SYMBOL     = "OANDA:EUR_USD"
+    AV_SYMBOL_FROM     = "EUR"
+    AV_SYMBOL_TO       = "USD"
+    MYFXBOOK_URL       = "https://www.myfxbook.com/api/get-community-outlook.json"
+    JBLANKED_FF_URL    = "https://www.jblanked.com/news/api/forex/calendar/today/"
 
     def __init__(self):
         self.finnhub_key  = os.getenv("FINNHUB_API_KEY", "")
         self.jblanked_key = os.getenv("JBLANKED_API_KEY", "")
+        self.av_key       = os.getenv("ALPHAVANTAGE_API_KEY", "")
 
-        # Inicializar cliente Finnhub
         self._finnhub_client = None
         if FINNHUB_OK and self.finnhub_key:
             self._finnhub_client = finnhub.Client(api_key=self.finnhub_key)
 
-        # Inicializar cliente jb-news
         self._jbnews_client = None
         if JBNEWS_OK and self.jblanked_key:
             self._jbnews_client = JBNews(api_key=self.jblanked_key)
 
-        # Caché simple (evita llamadas repetidas en el mismo ciclo de 60s)
         self._cache: dict = {}
-        self._cache_ttl   = 55   # segundos
+        self._cache_ttl   = 55
 
-    # ── Caché ────────────────────────────────────────────────────────────
+    # ── Cache ────────────────────────────────────────────────────────────
 
     def _cache_get(self, key: str):
         entry = self._cache.get(key)
@@ -77,81 +68,83 @@ class MarketContext:
     def _cache_set(self, key: str, data):
         self._cache[key] = {"data": data, "ts": datetime.now(timezone.utc)}
 
-    # ── Finnhub: Señales técnicas ────────────────────────────────────────
+    # ── 1. Finnhub: RSI + MACD via /forex/candle + /indicator ───────────
 
     def get_technical_signal(self) -> dict:
         """
-        Retorna resumen técnico de Finnhub en M1.
-        {signal, buy, sell, neutral, rsi, macd_signal, adx, error}
+        Usa SOLO endpoints FREE de Finnhub:
+          - /forex/candle   → precios OANDA:EUR_USD M1
+          - /indicator      → RSI(14) y MACD
+        NO usa /scan/technical-indicator (requiere premium).
         """
         cached = self._cache_get("technical")
         if cached:
             return cached
 
-        result = {"signal": None, "buy": 0, "sell": 0, "neutral": 0,
-                  "rsi": None, "macd_signal": None, "adx": None, "error": None}
+        result = {"rsi": None, "macd_signal": None, "candle_trend": None, "error": None}
 
-        if not self._finnhub_client:
-            result["error"] = "Finnhub no configurado (FINNHUB_API_KEY ausente)"
+        if not self.finnhub_key:
+            result["error"] = "FINNHUB_API_KEY no configurada"
+            self._cache_set("technical", result)
             return result
 
+        now_ts  = int(datetime.now(timezone.utc).timestamp())
+        from_ts = now_ts - 3600  # última hora
+
         try:
-            # Resumen de indicadores técnicos
-            scan = self._finnhub_client.technical_indicator(
-                symbol=self.FINNHUB_SYMBOL, resolution="1",
-                _from=int((datetime.now(timezone.utc) - timedelta(hours=2)).timestamp()),
-                to=int(datetime.now(timezone.utc).timestamp()),
-                indicator="sma",   # solo para validar conexión
-            )
-
-            # Aggregate indicators (endpoint correcto)
-            r = requests.get(
-                "https://finnhub.io/api/v1/scan/technical-indicator",
-                params={"symbol": self.FINNHUB_SYMBOL, "resolution": "1",
-                        "token": self.finnhub_key},
-                timeout=5,
-            )
-            if r.status_code == 200:
-                d = r.json()
-                ta = d.get("technicalAnalysis", {})
-                result["signal"]  = ta.get("signal", "UNKNOWN").upper()
-                result["buy"]     = ta.get("buy", 0)
-                result["sell"]    = ta.get("sell", 0)
-                result["neutral"] = ta.get("neutral", 0)
-                trend = d.get("trend", {})
-                result["adx"]     = trend.get("adx")
-
             # RSI
-            now_ts  = int(datetime.now(timezone.utc).timestamp())
-            from_ts = now_ts - 3600
-            r2 = requests.get(
+            r_rsi = requests.get(
                 "https://finnhub.io/api/v1/indicator",
-                params={"symbol": self.FINNHUB_SYMBOL, "resolution": "1",
-                        "indicator": "rsi", "timeperiod": 14,
-                        "from": from_ts, "to": now_ts,
-                        "token": self.finnhub_key},
-                timeout=5,
+                params={
+                    "symbol": self.FINNHUB_SYMBOL, "resolution": "1",
+                    "indicator": "rsi", "timeperiod": 14,
+                    "from": from_ts, "to": now_ts,
+                    "token": self.finnhub_key
+                },
+                timeout=6,
             )
-            if r2.status_code == 200:
-                rsi_list = r2.json().get("rsi", [])
+            if r_rsi.status_code == 200:
+                rsi_list = r_rsi.json().get("rsi", [])
                 if rsi_list:
                     result["rsi"] = round(rsi_list[-1], 2)
 
             # MACD
-            r3 = requests.get(
+            r_macd = requests.get(
                 "https://finnhub.io/api/v1/indicator",
-                params={"symbol": self.FINNHUB_SYMBOL, "resolution": "1",
-                        "indicator": "macd",
-                        "from": from_ts, "to": now_ts,
-                        "token": self.finnhub_key},
-                timeout=5,
+                params={
+                    "symbol": self.FINNHUB_SYMBOL, "resolution": "1",
+                    "indicator": "macd",
+                    "from": from_ts, "to": now_ts,
+                    "token": self.finnhub_key
+                },
+                timeout=6,
             )
-            if r3.status_code == 200:
-                md   = r3.json()
+            if r_macd.status_code == 200:
+                md   = r_macd.json()
                 macd = md.get("macd", [])
                 sig  = md.get("macdSignal", [])
                 if macd and sig:
                     result["macd_signal"] = "BUY" if macd[-1] > sig[-1] else "SELL"
+                    result["macd_hist"]   = round(macd[-1] - sig[-1], 5)
+
+            # Velas recientes para tendencia simple
+            r_candle = requests.get(
+                "https://finnhub.io/api/v1/forex/candle",
+                params={
+                    "symbol": self.FINNHUB_SYMBOL, "resolution": "1",
+                    "from": from_ts, "to": now_ts,
+                    "token": self.finnhub_key
+                },
+                timeout=6,
+            )
+            if r_candle.status_code == 200:
+                candles = r_candle.json()
+                closes  = candles.get("c", [])
+                if len(closes) >= 5:
+                    avg5   = sum(closes[-5:]) / 5
+                    latest = closes[-1]
+                    result["candle_trend"] = "UP" if latest > avg5 else "DOWN"
+                    result["last_price"]   = round(latest, 5)
 
         except Exception as e:
             result["error"] = str(e)
@@ -159,13 +152,107 @@ class MarketContext:
         self._cache_set("technical", result)
         return result
 
-    # ── jb-news: Calendario económico ───────────────────────────────────
+    # ── 2. Myfxbook: % Long/Short sin API key ───────────────────────────
+
+    def get_myfxbook_sentiment(self) -> dict:
+        """
+        Endpoint público de Myfxbook — no requiere API key.
+        Retorna: {long_pct, short_pct, signal, error}
+        Señal contraria: si >65% están SHORT → considerar BUY
+        """
+        cached = self._cache_get("myfxbook")
+        if cached:
+            return cached
+
+        result = {"long_pct": None, "short_pct": None, "signal": None, "error": None}
+
+        try:
+            r = requests.get(
+                self.MYFXBOOK_URL,
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=8,
+            )
+            if r.status_code == 200:
+                data     = r.json()
+                symbols  = data.get("symbols", [])
+                eurusd   = next(
+                    (s for s in symbols if s.get("name", "").upper() == "EURUSD"), None
+                )
+                if eurusd:
+                    long_pct  = float(eurusd.get("longPercentage",  0))
+                    short_pct = float(eurusd.get("shortPercentage", 0))
+                    result["long_pct"]  = round(long_pct, 1)
+                    result["short_pct"] = round(short_pct, 1)
+                    # Señal contraria (crowd psychology)
+                    if short_pct >= 65:
+                        result["signal"] = "CONTRA-SIGNAL BUY (mayoría short)"
+                    elif long_pct >= 65:
+                        result["signal"] = "CONTRA-SIGNAL SELL (mayoría long)"
+                    else:
+                        result["signal"] = "NEUTRAL (mercado dividido)"
+                else:
+                    result["error"] = "EURUSD no encontrado en Myfxbook"
+            else:
+                result["error"] = f"Myfxbook HTTP {r.status_code}"
+        except Exception as e:
+            result["error"] = f"Myfxbook: {e}"
+
+        self._cache_set("myfxbook", result)
+        return result
+
+    # ── 3a. Finnhub: Calendario económico FREE ──────────────────────────
+
+    def get_finnhub_calendar(self) -> list[dict]:
+        """
+        /calendar/economic — disponible en plan FREE de Finnhub.
+        Filtra eventos EUR y USD del día.
+        """
+        cached = self._cache_get("finnhub_cal")
+        if cached is not None:
+            return cached
+
+        events = []
+        if not self.finnhub_key:
+            return events
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        try:
+            r = requests.get(
+                "https://finnhub.io/api/v1/calendar/economic",
+                params={"from": today, "to": today, "token": self.finnhub_key},
+                timeout=8,
+            )
+            if r.status_code == 200:
+                for evt in r.json().get("economicCalendar", []):
+                    country = str(evt.get("country", "")).upper()
+                    if country not in ("US", "EU", "DE", "FR", "IT", "ES"):
+                        continue
+                    impact = str(evt.get("impact", "")).upper()
+                    events.append({
+                        "source":   "Finnhub",
+                        "name":     evt.get("event", ""),
+                        "country":  country,
+                        "impact":   impact if impact else "LOW",
+                        "time":     str(evt.get("time", "")),
+                        "actual":   evt.get("actual",   "pendiente"),
+                        "forecast": evt.get("estimate", "-"),
+                        "previous": evt.get("prev",     "-"),
+                        "currency": "USD" if country == "US" else "EUR",
+                    })
+        except Exception as e:
+            print(f"[MarketContext] Finnhub calendar error: {e}")
+
+        self._cache_set("finnhub_cal", events)
+        return events
+
+    # ── 3b. jblanked: MQL5 + ForexFactory calendars ─────────────────────
 
     def get_news_calendar(self) -> list[dict]:
         """
-        Obtiene eventos económicos del día para EUR y USD.
-        Cada evento: {name, currency, impact, strength, quality,
-                      outcome, time, actual, forecast, previous, ml_prediction}
+        Combina:
+          - jblanked MQL5 calendar (con API key)
+          - jblanked ForexFactory calendar (sin API key)
+          - Finnhub economic calendar (con finnhub key)
         """
         cached = self._cache_get("news")
         if cached is not None:
@@ -173,63 +260,147 @@ class MarketContext:
 
         events = []
 
-        if not self.jblanked_key:
-            self._cache_set("news", events)
-            return events
+        # ── jblanked MQL5 (con key) ──
+        if self.jblanked_key:
+            try:
+                if self._jbnews_client:
+                    raw = self._jbnews_client.calendar() or []
+                else:
+                    r = requests.get(
+                        "https://www.jblanked.com/news/api/calendar/",
+                        headers={"Authorization": f"Api-Key {self.jblanked_key}"},
+                        timeout=8,
+                    )
+                    raw = r.json() if r.status_code == 200 else []
 
+                for evt in raw:
+                    currency = str(evt.get("currency", "")).upper()
+                    if currency not in ("EUR", "USD"):
+                        continue
+                    strength = str(evt.get("strength", "")).upper()
+                    impact   = "HIGH" if strength == "STRONG" else "MEDIUM" if strength == "WEAK" else "LOW"
+                    events.append({
+                        "source":        "jblanked-MQL5",
+                        "name":          evt.get("name", ""),
+                        "currency":      currency,
+                        "impact":        impact,
+                        "strength":      strength,
+                        "quality":       str(evt.get("quality", "")).upper(),
+                        "outcome":       str(evt.get("outcome", "")).upper(),
+                        "time":          str(evt.get("date", "")),
+                        "actual":        evt.get("actual",   "pendiente"),
+                        "forecast":      evt.get("forecast", "-"),
+                        "previous":      evt.get("previous", "-"),
+                        "ml_prediction": evt.get("ml_prediction", ""),
+                    })
+            except Exception as e:
+                print(f"[MarketContext] jblanked MQL5 error: {e}")
+
+        # ── jblanked ForexFactory (sin key) ──
         try:
-            if self._jbnews_client:
-                # Usar la librería oficial jb-news
-                raw = self._jbnews_client.calendar()
-            else:
-                # Fallback: GET directo
-                r = requests.get(
-                    "https://www.jblanked.com/news/api/calendar/",
-                    headers={"Content-Type": "application/json",
-                             "Authorization": f"Api-Key {self.jblanked_key}"},
-                    timeout=8,
-                )
-                raw = r.json() if r.status_code == 200 else []
-
-            for evt in (raw or []):
-                currency = str(evt.get("currency", "")).upper()
-                if currency not in ("EUR", "USD"):
-                    continue
-
-                # strength / impact — jblanked usa Outcome, Strength, Quality
-                strength = str(evt.get("strength", "")).upper()   # STRONG/WEAK
-                quality  = str(evt.get("quality",  "")).upper()   # GOOD/BAD
-                outcome  = str(evt.get("outcome",  "")).upper()   # metéón del evento
-
-                # Mapear impact para el bot: HIGH si strength=STRONG
-                impact = "HIGH" if strength == "STRONG" else "MEDIUM" if strength == "WEAK" else "LOW"
-
-                events.append({
-                    "name":          evt.get("name", ""),
-                    "currency":      currency,
-                    "impact":        impact,
-                    "strength":      strength,
-                    "quality":       quality,
-                    "outcome":       outcome,
-                    "time":          str(evt.get("date", "")),
-                    "actual":        evt.get("actual",   "pendiente"),
-                    "forecast":      evt.get("forecast", "-"),
-                    "previous":      evt.get("previous", "-"),
-                    "ml_prediction": evt.get("ml_prediction", ""),  # bullish/bearish
-                })
-
+            r_ff = requests.get(
+                self.JBLANKED_FF_URL,
+                headers={"Content-Type": "application/json"},
+                timeout=8,
+            )
+            if r_ff.status_code == 200:
+                for evt in (r_ff.json() or []):
+                    currency = str(evt.get("currency", "")).upper()
+                    if currency not in ("EUR", "USD"):
+                        continue
+                    impact_raw = str(evt.get("impact", "")).upper()
+                    impact     = impact_raw if impact_raw in ("HIGH", "MEDIUM", "LOW") else "LOW"
+                    # Evitar duplicados por nombre+hora
+                    name = evt.get("name", "")
+                    time = str(evt.get("date", evt.get("time", "")))
+                    if not any(e["name"] == name and e["time"] == time for e in events):
+                        events.append({
+                            "source":        "ForexFactory",
+                            "name":          name,
+                            "currency":      currency,
+                            "impact":        impact,
+                            "strength":      "",
+                            "quality":       "",
+                            "outcome":       "",
+                            "time":          time,
+                            "actual":        evt.get("actual",   "pendiente"),
+                            "forecast":      evt.get("forecast", "-"),
+                            "previous":      evt.get("previous", "-"),
+                            "ml_prediction": "",
+                        })
         except Exception as e:
-            print(f"[MarketContext] jb-news error: {e}")
+            print(f"[MarketContext] ForexFactory error: {e}")
+
+        # ── Finnhub calendar ──
+        for evt in self.get_finnhub_calendar():
+            name = evt["name"]
+            time = evt["time"]
+            if not any(e["name"] == name and e["time"] == time for e in events):
+                events.append(evt)
 
         self._cache_set("news", events)
         return events
 
+    # ── 4. Alpha Vantage: Sentiment de noticias ─────────────────────────
+
+    def get_av_sentiment(self) -> dict:
+        """
+        Alpha Vantage NEWS_SENTIMENT — plan free 25 req/día.
+        Retorna score promedio de sentimiento para EUR/USD.
+        """
+        cached = self._cache_get("av_sentiment")
+        if cached:
+            return cached
+
+        result = {"score": None, "label": None, "articles": 0, "error": None}
+
+        if not self.av_key:
+            result["error"] = "ALPHAVANTAGE_API_KEY no configurada"
+            self._cache_set("av_sentiment", result)
+            return result
+
+        try:
+            r = requests.get(
+                "https://www.alphavantage.co/query",
+                params={
+                    "function": "NEWS_SENTIMENT",
+                    "topics":   "forex",
+                    "tickers":  "FOREX:EURUSD",
+                    "limit":    10,
+                    "apikey":   self.av_key,
+                },
+                timeout=10,
+            )
+            if r.status_code == 200:
+                feed = r.json().get("feed", [])
+                if feed:
+                    scores = []
+                    for article in feed:
+                        for ts in article.get("ticker_sentiment", []):
+                            if "EUR" in ts.get("ticker", ""):
+                                try:
+                                    scores.append(float(ts["ticker_sentiment_score"]))
+                                except Exception:
+                                    pass
+                    if scores:
+                        avg   = sum(scores) / len(scores)
+                        result["score"]    = round(avg, 4)
+                        result["articles"] = len(feed)
+                        if avg >= 0.15:
+                            result["label"] = "BULLISH"
+                        elif avg <= -0.15:
+                            result["label"] = "BEARISH"
+                        else:
+                            result["label"] = "NEUTRAL"
+        except Exception as e:
+            result["error"] = f"AlphaVantage: {e}"
+
+        self._cache_set("av_sentiment", result)
+        return result
+
     # ── Bloqueo por noticias de alto impacto ────────────────────────────
 
     def should_hold_news(self) -> tuple[bool, str]:
-        """
-        True si hay evento de impacto HIGH en los próximos NEWS_BLOCK_MINUTES.
-        """
         events = self.get_news_calendar()
         now    = datetime.now(timezone.utc)
         window = now + timedelta(minutes=self.NEWS_BLOCK_MINUTES)
@@ -248,62 +419,78 @@ class MarketContext:
                     continue
 
             if evt_dt and now <= evt_dt <= window:
-                mins_left = int((evt_dt - now).total_seconds() / 60)
+                mins = int((evt_dt - now).total_seconds() / 60)
+                src  = evt.get("source", "")
                 return True, (
-                    f"⚠️ NOTICIA ALTO IMPACTO en {mins_left} min: "
-                    f"{evt['name']} ({evt['currency']}) | "
-                    f"Strength: {evt['strength']} | Quality: {evt['quality']}"
+                    f"⚠️ NOTICIA ALTO IMPACTO en {mins} min: "
+                    f"{evt['name']} ({evt.get('currency','?')}) [{src}] | "
+                    f"Strength: {evt.get('strength','-')} | Quality: {evt.get('quality','-')}"
                 )
 
         return False, ""
 
-    # ── Texto para el prompt ────────────────────────────────────────────
+    # ── Texto completo para el prompt ───────────────────────────────────
 
     def get_context_text(self) -> str:
-        """Bloque completo de contexto externo listo para inyectar en el prompt."""
         lines = ["=== CONTEXTO EXTERNO DE MERCADO ==="]
 
-        # ── Señales técnicas Finnhub ──
+        # ── 1. Señales técnicas Finnhub (free) ──
         tech = self.get_technical_signal()
+        lines.append("  [Finnhub — FREE /indicator + /forex/candle]")
         if tech["error"]:
-            lines.append(f"  Finnhub : {tech['error']}")
+            lines.append(f"    Error: {tech['error']}")
         else:
-            rsi_warn = ""
-            if tech["rsi"]:
-                if   tech["rsi"] >= 70: rsi_warn = " ⚠️ SOBRECOMPRADO"
-                elif tech["rsi"] <= 30: rsi_warn = " ⚠️ SOBREVENDIDO"
-
-            lines.append(f"  Finnhub señal M1  : {tech['signal']}")
-            lines.append(f"    BUY:{tech['buy']} SELL:{tech['sell']} NEUTRAL:{tech['neutral']}")
-            if tech["rsi"]:
-                lines.append(f"    RSI(14)           : {tech['rsi']}{rsi_warn}")
+            if tech.get("last_price"):
+                lines.append(f"    Precio EUR/USD : {tech['last_price']}")
+            if tech.get("candle_trend"):
+                lines.append(f"    Tendencia M1   : {tech['candle_trend']}")
+            if tech["rsi"] is not None:
+                warn = ""
+                if tech["rsi"] >= 70:   warn = " ⚠️ SOBRECOMPRADO"
+                elif tech["rsi"] <= 30: warn = " ⚠️ SOBREVENDIDO"
+                lines.append(f"    RSI(14)        : {tech['rsi']}{warn}")
             if tech["macd_signal"]:
-                lines.append(f"    MACD              : {tech['macd_signal']}")
-            if tech["adx"] is not None:
-                adx_label = "tendencia fuerte" if tech["adx"] > 25 else "mercado lateral"
-                lines.append(f"    ADX               : {tech['adx']:.1f} ({adx_label})")
+                lines.append(f"    MACD           : {tech['macd_signal']} (hist: {tech.get('macd_hist', '?')})")
 
-        # ── Noticias económicas ──
+        # ── 2. Myfxbook sentiment (sin key) ──
+        lines.append("  [Myfxbook Community Outlook — sin API key]")
+        mfx = self.get_myfxbook_sentiment()
+        if mfx["error"]:
+            lines.append(f"    Error: {mfx['error']}")
+        else:
+            lines.append(f"    Long: {mfx['long_pct']}%  Short: {mfx['short_pct']}%")
+            lines.append(f"    Señal contraria: {mfx['signal']}")
+
+        # ── 3. Alpha Vantage sentiment ──
+        lines.append("  [Alpha Vantage NEWS_SENTIMENT — 25 req/día]")
+        av = self.get_av_sentiment()
+        if av["error"]:
+            lines.append(f"    Error: {av['error']}")
+        else:
+            lines.append(f"    Score: {av['score']}  |  {av['label']}  ({av['articles']} artículos)")
+
+        # ── 4. Calendario económico (3 fuentes combinadas) ──
         events   = self.get_news_calendar()
         high_evt = [e for e in events if e["impact"] == "HIGH"]
         med_evt  = [e for e in events if e["impact"] == "MEDIUM"]
 
-        if not events and not self.jblanked_key:
-            lines.append("  jblanked: no configurado (JBLANKED_API_KEY ausente)")
-        elif not events:
-            lines.append("  Noticias hoy EUR/USD: ninguna registrada")
+        sources = set(e.get("source", "") for e in events)
+        lines.append(f"  [Calendario EUR/USD — fuentes: {', '.join(sources) if sources else 'ninguna'}]")
+
+        if not events:
+            lines.append("    Sin eventos registrados para hoy")
         else:
-            lines.append(f"  Noticias hoy EUR/USD: {len(high_evt)} alto, {len(med_evt)} medio impacto")
-            for e in high_evt[:4]:
-                ml = f" | ML: {e['ml_prediction']}" if e["ml_prediction"] else ""
+            lines.append(f"    {len(high_evt)} alto impacto | {len(med_evt)} medio impacto")
+            for e in sorted(high_evt, key=lambda x: x["time"])[:5]:
+                ml  = f" | ML: {e['ml_prediction']}" if e.get("ml_prediction") else ""
+                src = f" [{e.get('source','')}]"
                 lines.append(
-                    f"    🔴 {e['time'][:16]} | {e['name']} ({e['currency']}) "
-                    f"| Actual: {e['actual']} Forecast: {e['forecast']} "
-                    f"| Strength: {e['strength']} Quality: {e['quality']}{ml}"
+                    f"    🔴 {e['time'][:16]} | {e['name']} ({e.get('currency','?')})"
+                    f" | Actual: {e['actual']} Prev: {e['previous']}{ml}{src}"
                 )
-            for e in med_evt[:2]:
+            for e in sorted(med_evt, key=lambda x: x["time"])[:3]:
                 lines.append(
-                    f"    🟡 {e['time'][:16]} | {e['name']} ({e['currency']})"
+                    f"    🟡 {e['time'][:16]} | {e['name']} ({e.get('currency','?')}) [{e.get('source','')}]"
                 )
 
         # ── Advertencia de bloqueo ──
