@@ -1,5 +1,8 @@
-# Broker - MetaTrader 5
-MetaTrader5==5.0.5640
+# ─────────────────────────────────────────────────────────────
+# requirements.txt  →  dependencias COMUNES (Docker / Linux / Windows)
+# MetaTrader5 NO se incluye aquí porque solo existe para Windows.
+# En Windows instala manualmente: pip install MetaTrader5==5.0.5640
+# ─────────────────────────────────────────────────────────────
 
 # IA - OpenAI
 openai>=1.30.1

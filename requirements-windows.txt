@@ -1,0 +1,11 @@
+# ─────────────────────────────────────────────────────────────
+# requirements-windows.txt
+# Solo para ejecutar el bot completo en Windows con MT5.
+# Instalar con: pip install -r requirements-windows.txt
+# ─────────────────────────────────────────────────────────────
+
+# Incluye todo lo de requirements.txt
+-r requirements.txt
+
+# Broker - MetaTrader 5 (solo disponible en Windows x64)
+MetaTrader5==5.0.5640
