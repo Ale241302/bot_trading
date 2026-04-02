@@ -14,8 +14,8 @@ notion-client==2.2.1
 pinecone>=3.2.2
 
 # Contexto externo de mercado
-finnhub-client>=2.4.20      # Señales técnicas en tiempo real
-jb-news>=1.0.0               # Calendario económico jblanked (PyPI oficial)
+finnhub>=1.0.0              # pip install finnhub  (nombre correcto en PyPI)
+jb-news>=1.0.0              # Calendario económico jblanked
 
 # Utilidades
 python-dotenv==1.0.1
