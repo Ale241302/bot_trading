@@ -7,6 +7,7 @@ Ejecuta con:
 """
 
 import os
+import json
 import requests
 from datetime import datetime, timezone
 
@@ -57,7 +58,7 @@ try:
             timeout=8,
         )
         if r.status_code == 200:
-            data = r.json()
+            data   = r.json()
             closes = data.get("c", [])
             status = data.get("s", "?")
             if closes:
@@ -68,19 +69,19 @@ try:
         else:
             print(f"  {ERR} HTTP {r.status_code}: {r.text[:150]}")
             if r.status_code == 403:
-                print(f"       → Tu API key es invalida o expiro. Regenera en https://finnhub.io/dashboard")
+                print(f"       → Regenera tu key en https://finnhub.io/dashboard")
 except Exception as e:
     print(f"  {ERR} Excepcion: {e}")
 
-# ── 3. Myfxbook login ─────────────────────────────────────────────
+# ── 3. Myfxbook ────────────────────────────────────────────────
 sep("3. Myfxbook login + community outlook")
 try:
     email = os.getenv("MYFXBOOK_EMAIL", "")
     pwd   = os.getenv("MYFXBOOK_PASSWORD", "")
     if not email or not pwd:
-        print(f"  {ERR} MYFXBOOK_EMAIL o MYFXBOOK_PASSWORD vacias en .env")
-        print(f"       Agrega las credenciales de tu cuenta myfxbook.com")
+        print(f"  {ERR} MYFXBOOK_EMAIL o MYFXBOOK_PASSWORD vacias")
     else:
+        # Login
         r = requests.get(
             "https://www.myfxbook.com/api/login.json",
             params={"email": email, "password": pwd},
@@ -90,26 +91,56 @@ try:
         if not data.get("error", True):
             session = data.get("session", "")
             print(f"  {OK} Login exitoso | session = {session[:8]}...")
-            # Probar outlook
+
+            # Endpoint 1: get-community-outlook.json (requiere portfolio vinculado)
             r2 = requests.get(
                 "https://www.myfxbook.com/api/get-community-outlook.json",
                 params={"session": session},
                 timeout=10,
             )
-            if r2.status_code == 200:
-                syms = r2.json().get("symbols", [])
-                names = [s.get("name") for s in syms[:5]]
-                eurusd = next((s for s in syms if "EUR" in str(s.get("name","")).upper() and "USD" in str(s.get("name","")).upper()), None)
+            body2 = r2.json() if r2.status_code == 200 else {}
+            syms  = body2.get("symbols", [])
+            print(f"  [DEBUG] get-community-outlook symbols count: {len(syms)}")
+            if syms:
+                names = [s.get("name") for s in syms[:8]]
+                print(f"  [DEBUG] Nombres: {names}")
+                eurusd = next((s for s in syms
+                               if "EUR" in str(s.get("name","")).upper()
+                               and "USD" in str(s.get("name","")).upper()), None)
                 if eurusd:
-                    print(f"  {OK} EURUSD encontrado: long={eurusd.get('longPercentage')}% short={eurusd.get('shortPercentage')}%")
+                    print(f"  {OK} EURUSD: long={eurusd.get('longPercentage')}% short={eurusd.get('shortPercentage')}%")
                 else:
-                    print(f"  {WRN} EURUSD no encontrado. Nombres disponibles: {names}")
+                    print(f"  {WRN} EURUSD no encontrado entre: {names}")
             else:
-                print(f"  {ERR} Outlook HTTP {r2.status_code}")
+                print(f"  {WRN} symbols vacio. JSON completo: {json.dumps(body2)[:300]}")
+                print(f"  CAUSA: cuenta sin portfolio vinculado en myfxbook.com")
+                print(f"  ALTERNATIVA: probando endpoint publico sin sesion...")
+
+                # Endpoint 2: sin sesion (endpoint publico antiguo)
+                r3 = requests.get(
+                    "https://www.myfxbook.com/api/get-community-outlook.json",
+                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                             "AppleWebKit/537.36 (KHTML, like Gecko) "
+                             "Chrome/122.0.0.0 Safari/537.36"},
+                    timeout=10,
+                )
+                body3 = r3.json() if r3.status_code == 200 else {}
+                syms3 = body3.get("symbols", [])
+                print(f"  [DEBUG] Sin sesion: HTTP {r3.status_code} | symbols count: {len(syms3)}")
+                if syms3:
+                    names3 = [s.get("name") for s in syms3[:8]]
+                    print(f"  {OK} Endpoint publico funciona! Nombres: {names3}")
+                else:
+                    print(f"  {WRN} Endpoint publico tambien vacio. JSON: {json.dumps(body3)[:200]}")
+                    print(f"")
+                    print(f"  SOLUCION: Vincula un broker demo en myfxbook.com:")
+                    print(f"    1. Login en https://www.myfxbook.com")
+                    print(f"    2. My Accounts > Add New Account")
+                    print(f"    3. Conecta MT5 demo (cualquier broker)")
+                    print(f"    4. Vuelve a correr este script")
         else:
             msg = data.get("message", r.text[:150])
             print(f"  {ERR} Login fallido: {msg}")
-            print(f"       Verifica email/password en https://www.myfxbook.com")
 except Exception as e:
     print(f"  {ERR} Excepcion: {e}")
 
@@ -128,11 +159,11 @@ try:
         )
         body = r.json() if r.status_code == 200 else {}
         if "Information" in body or "Note" in body:
-            print(f"  {WRN} Limite alcanzado: {body.get('Information', body.get('Note',''))[:100]}")
+            print(f"  {WRN} Limite: {body.get('Information', body.get('Note',''))[:100]}")
         elif body.get("feed"):
             print(f"  {OK} {len(body['feed'])} articulos recibidos")
         else:
-            print(f"  {WRN} Respuesta sin feed: {str(body)[:150]}")
+            print(f"  {WRN} Sin feed: {str(body)[:150]}")
 except Exception as e:
     print(f"  {ERR} Excepcion: {e}")
 
