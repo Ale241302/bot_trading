@@ -2,15 +2,16 @@
 main.py
 ────────────────────────────────────────────
 Punto de entrada del bot de trading.
-Loop principal: analiza el mercado cada INTERVAL
-segundos y ejecuta operaciones según la IA.
 
-Integraciones activas:
-  - MT5     : broker (solo Windows)
-  - OpenAI  : decisión (BUY/SELL/HOLD)
-  - Notion  : log estructurado
-  - Pinecone: memoria vectorial semántica
-  - CapitalGuard: protección de ganancias
+Flujo por ciclo (cada INTERVAL segundos):
+  1. CapitalGuard   → ¿puedo operar?
+  2. MarketContext  → ¿hay noticia de alto impacto?
+  3. MT5            → velas OHLCV
+  4. Notion         → historial estructurado reciente
+  5. Pinecone       → memoria vectorial semántica
+  6. OpenAI         → decisión BUY/SELL/HOLD
+  7. MT5            → ejecutar orden
+  8. Notion+Pinecone→ registrar operación
 ────────────────────────────────────────────
 """
 
@@ -19,12 +20,13 @@ import schedule
 from dotenv import load_dotenv
 import os
 
-from modules.mt5_connector import MT5Connector
-from modules.ai_analyst    import AIAnalyst
-from modules.notion_logger  import NotionLogger
-from modules.trader         import Trader
-from modules.pinecone_memory import PineconeMemory
-from modules.capital_guard  import CapitalGuard
+from modules.mt5_connector   import MT5Connector
+from modules.ai_analyst       import AIAnalyst
+from modules.notion_logger    import NotionLogger
+from modules.trader           import Trader
+from modules.pinecone_memory  import PineconeMemory
+from modules.capital_guard    import CapitalGuard
+from modules.market_context   import MarketContext
 
 load_dotenv()
 
@@ -36,75 +38,69 @@ def run_bot():
     """Ciclo principal de análisis y ejecución."""
     print("\n⏰ Analizando mercado...")
 
-    # 1. Verificar si el CapitalGuard permite operar ANTES de llamar a la IA
+    # ── PASO 1: CapitalGuard ─────────────────────────────────────────────────
     can_trade, guard_reason = capital.should_trade()
-    print(f"💰 Capital Guard: {guard_reason}")
+    print(f"💰 Capital Guard : {guard_reason}")
     if not can_trade:
-        print("⏸️  Capital Guard bloqueó el ciclo. No se llama a la IA.")
+        print("⏸️  Capital Guard bloqueó el ciclo.")
         return
 
-    # 2. Datos de mercado
+    # ── PASO 2: Bloqueo por noticias de alto impacto ─────────────────────────
+    hold_news, news_reason = mktctx.should_hold_news()
+    if hold_news:
+        print(f"🚨 News Block     : {news_reason}")
+        print("⏸️  Noticia de alto impacto próxima. No se llama a la IA.")
+        return
+
+    # ── PASO 3: Datos de mercado MT5 ─────────────────────────────────────────
     market_data = mt5.get_candles(SYMBOL, count=int(os.getenv("CANDLES_HISTORY", 50)))
     if market_data is None:
         print("❌ No se pudieron obtener datos de mercado.")
         return
 
-    # 3. Contextos para la IA
+    # ── PASO 4-6: Ensamblar contexto completo para la IA ────────────────────
     history        = notion.get_recent_operations(limit=10)
     pinecone_ctx   = memory.get_stats_context()
     capital_status = capital.status_text()
+    market_ctx     = mktctx.get_context_text()   # Finnhub + jblanked
 
-    # 4. Decisión de la IA
+    # ── PASO 6: Decisión de la IA ────────────────────────────────────────────
     decision = ai.analyze(
-        symbol=SYMBOL,
-        candles=market_data,
-        history=history,
-        pinecone_context=pinecone_ctx,
-        capital_status=capital_status,
+        symbol         = SYMBOL,
+        candles        = market_data,
+        history        = history,
+        pinecone_context = pinecone_ctx,
+        capital_status = capital_status,
+        market_context = market_ctx,
     )
-    print(f"🤖 Decisión IA: {decision['action']} | Motivo: {decision['reason']}")
+    print(f"🤖 IA            : {decision['action']} | {decision['reason']}")
 
-    # 5. Ejecutar si es BUY o SELL
+    # ── PASO 7-8: Ejecutar y registrar ──────────────────────────────────────
     if decision["action"] in ["BUY", "SELL"]:
         result = trader.execute(symbol=SYMBOL, action=decision["action"])
         if result:
             lot = float(os.getenv("LOT_SIZE", 0.01))
 
-            # Registrar en Notion
             notion.log_operation(
-                symbol=SYMBOL,
-                action=decision["action"],
-                lot_size=lot,
-                price_open=result["price"],
+                symbol=SYMBOL, action=decision["action"],
+                lot_size=lot, price_open=result["price"],
                 reason=decision["reason"],
             )
-
-            # Registrar en Pinecone
             memory.log_operation(
-                symbol=SYMBOL,
-                action=decision["action"],
-                lot_size=lot,
-                price_open=result["price"],
-                reason=decision["reason"],
-                ticket=result.get("ticket"),
+                symbol=SYMBOL, action=decision["action"],
+                lot_size=lot, price_open=result["price"],
+                reason=decision["reason"], ticket=result.get("ticket"),
             )
-
-            # Simular P&L estimado para el CapitalGuard
-            # (en producción debes cerrar la orden y calcular el P&L real)
-            # Con 0.01 lotes en EURUSD, 1 pip = ~$0.10
-            # El TP es 40 pips → estimado +$4 por operación ganadora
-            # Aquí se registra 0 hasta que el sistema detecte cierre real
-            # TODO: conectar con el cierre real de MT5 para actualizar capital
-            print(f"✅ Operación ejecutada y registrada.")
+            print("✅ Operación ejecutada y registrada en Notion + Pinecone.")
     else:
-        print("⏸️  IA decidió no operar en este ciclo.")
+        print("⏸️  IA decidió HOLD en este ciclo.")
 
 
 if __name__ == "__main__":
-    print("🚀 Iniciando Trading Bot...")
-    print(f"   Símbolo : {SYMBOL}")
+    print("🚀 Iniciando Trading Bot ASM...")
+    print(f"   Símbolo  : {SYMBOL}")
     print(f"   Intervalo: {INTERVAL}s")
-    print(f"   Objetivos: $18/día | $125/semana | $500/mes")
+    print(f"   Objetivos: $9/día | $63/semana | $250/mes")
 
     mt5     = MT5Connector()
     ai      = AIAnalyst()
@@ -112,17 +108,20 @@ if __name__ == "__main__":
     trader  = Trader(mt5)
     memory  = PineconeMemory()
     capital = CapitalGuard()
+    mktctx  = MarketContext()
 
     if not mt5.connect():
         print("❌ No se pudo conectar a MT5. Abortando.")
         exit(1)
 
-    print(f"✅ MT5 conectado     | {SYMBOL}")
-    print(f"✅ Pinecone listo    | índice: {os.getenv('PINECONE_INDEX_NAME', 'bottrading')}")
-    print(f"✅ CapitalGuard listo | $50 → $500 en 30 días")
+    print(f"✅ MT5 conectado      | {SYMBOL}")
+    print(f"✅ Pinecone listo     | {os.getenv('PINECONE_INDEX_NAME', 'bottrading')}")
+    print(f"✅ Finnhub listo      | {'configurado' if os.getenv('FINNHUB_API_KEY') else 'SIN KEY ⚠️'}")
+    print(f"✅ jblanked News listo| {'configurado' if os.getenv('JBLANKED_API_KEY') else 'SIN KEY ⚠️'}")
+    print(f"✅ CapitalGuard listo | $50 → $250 en 30 días")
 
     schedule.every(INTERVAL).seconds.do(run_bot)
-    run_bot()  # primer ciclo inmediato
+    run_bot()
 
     while True:
         schedule.run_pending()

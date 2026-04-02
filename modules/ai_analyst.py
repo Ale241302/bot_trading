@@ -1,15 +1,18 @@
 """
 ai_analyst.py
 ────────────────────────────────────────────
-Modulo de inteligencia artificial.
-Usa OpenAI para analizar el mercado y decidir:
-  BUY  -> comprar
-  SELL -> vender
-  HOLD -> no hacer nada
+Decisión de trading vía OpenAI.
+Recibe el contexto completo ensamblado y retorna
+{"action": "BUY"|"SELL"|"HOLD", "reason": "..."}
 
-La estrategia se lee de: strategy/prompt.md
-El contexto dinámico (capital, historial, velas)
-se inyecta en el user_message en cada ciclo.
+Arquitectura del prompt:
+  system  → strategy/prompt.md  (estático, se carga al init)
+  user    → ensamblado dinámico cada ciclo:
+              [capital_status]    CapitalGuard
+              [market_context]    Finnhub + jblanked
+              [candles]           MT5 OHLCV
+              [historial Notion]  últimas 10 ops
+              [Pinecone context]  memoria vectorial
 ────────────────────────────────────────────
 """
 
@@ -24,7 +27,6 @@ class AIAnalyst:
         self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         self.model  = os.getenv("OPENAI_MODEL", "gpt-4o")
 
-        # Leer prompt desde .md (estrategia estática + reglas)
         prompt_path = os.path.join(
             os.path.dirname(__file__), "..", "strategy", "prompt.md"
         )
@@ -33,51 +35,49 @@ class AIAnalyst:
 
     def analyze(
         self,
-        symbol: str,
-        candles: pd.DataFrame,
-        history: list,
+        symbol:           str,
+        candles:          pd.DataFrame,
+        history:          list,
         pinecone_context: str = "",
-        capital_status: str  = "",
+        capital_status:   str = "",
+        market_context:   str = "",   # ← nuevo: Finnhub + jblanked
     ) -> dict:
         """
-        Envía datos de mercado, historial, contexto vectorial
-        y estado de capital a OpenAI.
-        Retorna: {"action": "BUY"|"SELL"|"HOLD", "reason": "..."}
+        Ensambla el user_message con todos los bloques de contexto
+        y llama a OpenAI para obtener la decisión.
         """
         candles_text = candles.tail(50).to_string(index=False)
 
-        # Historial estructurado de Notion
+        history_text = "Sin operaciones previas."
         if history:
             history_text = "\n".join([
                 f"- [{op['date']}] {op['type']} {op['symbol']} "
                 f"| Resultado: {op['result']} USD | Motivo: {op['reason']}"
                 for op in history
             ])
-        else:
-            history_text = "Sin operaciones previas."
 
-        # Contexto semántico de Pinecone (opcional)
-        pinecone_block = ""
-        if pinecone_context:
-            pinecone_block = f"\n{pinecone_context}\n"
+        # Construir bloques opcionales (solo si tienen contenido)
+        blocks = [f"Símbolo: {symbol}"]
 
-        # Estado de capital del CapitalGuard (opcional)
-        capital_block = ""
         if capital_status:
-            capital_block = f"\n{capital_status}\n"
+            blocks.append(capital_status)
 
-        user_message = f"""Simbolo: {symbol}
+        if market_context:
+            blocks.append(market_context)
 
-{capital_block}
-Ultimas velas OHLCV (M1, mas reciente al final):
-{candles_text}
+        blocks.append(f"Ultimas 50 velas OHLCV (M1, más reciente al final):\n{candles_text}")
+        blocks.append(f"Historial de operaciones recientes (Notion):\n{history_text}")
 
-Historial reciente de operaciones (Notion):
-{history_text}
-{pinecone_block}
-Responde UNICAMENTE con JSON valido:
-{{"action": "BUY" | "SELL" | "HOLD", "reason": "explicacion con filtros cumplidos y estado capital"}}
-"""
+        if pinecone_context:
+            blocks.append(pinecone_context)
+
+        blocks.append(
+            'Responde UNICAMENTE con JSON válido:\n'
+            '{"action": "BUY" | "SELL" | "HOLD", '
+            '"reason": "qué filtros ASM se cumplieron, patrón detectado y estado capital"}'
+        )
+
+        user_message = "\n\n".join(blocks)
 
         response = self.client.chat.completions.create(
             model=self.model,
@@ -85,9 +85,8 @@ Responde UNICAMENTE con JSON valido:
                 {"role": "system", "content": self.system_prompt},
                 {"role": "user",   "content": user_message},
             ],
-            temperature=0.2,          # más determinista para trading
+            temperature=0.2,
             response_format={"type": "json_object"},
         )
 
-        raw = response.choices[0].message.content
-        return json.loads(raw)
+        return json.loads(response.choices[0].message.content)
