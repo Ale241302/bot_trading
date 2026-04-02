@@ -2,71 +2,48 @@
 pinecone_memory.py
 ================================================
 Módulo de memoria vectorial con Pinecone.
-Guarda cada operación como vector (usando embeddings de OpenAI)
-y permite búsqueda semántica eficiente del historial.
+Usa el índice con embedding INTEGRADO (llama-text-embed-v2 / NVIDIA)
+de manera que Pinecone convierte el texto a vector automáticamente.
+No se necesita OpenAI ni llamadas externas para embeddings.
 ================================================
 """
 
 import os
-import json
 from datetime import datetime, timezone
-from openai import OpenAI
-from pinecone import Pinecone, ServerlessSpec
+from pinecone import Pinecone
 
 
 class PineconeMemory:
     """
-    Maneja el almacenamiento y búsqueda vectorial de operaciones
-    en Pinecone usando embeddings de OpenAI text-embedding-3-small.
+    Almacenamiento y búsqueda vectorial de operaciones de trading.
+
+    El índice debe estar creado en Pinecone con:
+      - Modelo integrado: llama-text-embed-v2  (NVIDIA Hosted)
+      - Tipo: Dense
+      - Modo: Serverless
+      - Field map: el campo "text" es el que Pinecone embebe automáticamente
+
+    Al hacer upsert se envía el texto plano; Pinecone genera el vector.
+    Al hacer query también se envía texto plano.
     """
 
-    INDEX_NAME   = "trading-operations"
-    DIMENSION    = 1536           # text-embedding-3-small
-    METRIC       = "cosine"
-    CLOUD        = "aws"
-    REGION       = "us-east-1"    # región gratuita de Pinecone Serverless
-
     def __init__(self):
-        api_key = os.getenv("PINECONE_API_KEY")
+        api_key    = os.getenv("PINECONE_API_KEY")
+        index_name = os.getenv("PINECONE_INDEX_NAME", "trading-operations")
+
         if not api_key:
             raise ValueError("PINECONE_API_KEY no está definida en las variables de entorno.")
 
-        self.pc     = Pinecone(api_key=api_key)
-        self.openai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        self.index  = self._get_or_create_index()
+        self.pc    = Pinecone(api_key=api_key)
+        self.index = self.pc.Index(index_name)
+        print(f"Pinecone: conectado al índice '{index_name}' (llama-text-embed-v2).")
 
-    # ── Índice ────────────────────────────────────────────────────────────────
-
-    def _get_or_create_index(self):
-        """Crea el índice si no existe y retorna la referencia."""
-        existing = [i.name for i in self.pc.list_indexes()]
-        if self.INDEX_NAME not in existing:
-            self.pc.create_index(
-                name=self.INDEX_NAME,
-                dimension=self.DIMENSION,
-                metric=self.METRIC,
-                spec=ServerlessSpec(cloud=self.CLOUD, region=self.REGION),
-            )
-            print(f"Pinecone: índice '{self.INDEX_NAME}' creado.")
-        else:
-            print(f"Pinecone: usando índice existente '{self.INDEX_NAME}'.")
-
-        return self.pc.Index(self.INDEX_NAME)
-
-    # ── Embeddings ────────────────────────────────────────────────────────────
-
-    def _embed(self, text: str) -> list[float]:
-        """Genera embedding para un texto con text-embedding-3-small."""
-        response = self.openai.embeddings.create(
-            model="text-embedding-3-small",
-            input=text,
-        )
-        return response.data[0].embedding
+    # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _operation_to_text(self, operation: dict) -> str:
         """
-        Convierte los campos de una operación a texto descriptivo
-        para generar un embedding semánticamente rico.
+        Convierte los campos de una operación a un texto descriptivo
+        que será embebido automáticamente por Pinecone.
         """
         parts = [
             f"Operación: {operation.get('action', '')} {operation.get('symbol', '')}",
@@ -98,7 +75,8 @@ class PineconeMemory:
         ticket: int        = None,
     ) -> str:
         """
-        Guarda la operación como vector en Pinecone.
+        Guarda la operación en Pinecone con embedding integrado.
+        El campo 'text' es el que llama-text-embed-v2 convierte a vector.
         Retorna el vector_id generado.
         """
         now = datetime.now(timezone.utc)
@@ -119,16 +97,16 @@ class PineconeMemory:
             "date":        now.isoformat(),
         }
 
-        text      = self._operation_to_text(operation)
-        embedding = self._embed(text)
+        # Texto que será embebido automáticamente por Pinecone
+        text = self._operation_to_text(operation)
 
-        # Pinecone solo acepta valores JSON serializables en metadata
+        # Metadata: valores planos que se devuelven en los resultados
         metadata = {
             "symbol":     symbol,
             "action":     action,
             "lot_size":   lot_size,
             "price_open": price_open,
-            "reason":     reason[:500],   # límite recomendado en metadata
+            "reason":     reason[:500],
             "status":     status,
             "date":       now.isoformat(),
         }
@@ -139,7 +117,17 @@ class PineconeMemory:
         if ticket is not None:
             metadata["ticket"] = ticket
 
-        self.index.upsert(vectors=[{"id": vector_id, "values": embedding, "metadata": metadata}])
+        # Con embedding integrado: upsert recibe 'text' (no 'values')
+        self.index.upsert_records(
+            namespace="operations",
+            records=[
+                {
+                    "id":       vector_id,
+                    "text":     text,       # ← campo que Pinecone embebe
+                    **metadata,
+                }
+            ],
+        )
         print(f"Pinecone: operación guardada -> {vector_id}")
         return vector_id
 
@@ -152,51 +140,62 @@ class PineconeMemory:
         filter_by: dict = None,
     ) -> list[dict]:
         """
-        Búsqueda semántica: dado un texto de consulta devuelve las
-        operaciones más similares ordenadas por relevancia.
+        Búsqueda semántica con texto plano.
+        Pinecone embebe el query automáticamente y busca por similitud coseno.
 
-        Ejemplo:
-            memory.query_similar("operaciones BUY en EURUSD con resultado positivo")
-            memory.query_similar("SELL GBPUSD", filter_by={"action": {"$eq": "SELL"}})
+        Ejemplos:
+            memory.query_similar("BUY EURUSD con resultado positivo")
+            memory.query_similar("SELL GBPUSD pérdida", filter_by={"action": {"$eq": "SELL"}})
         """
-        embedding = self._embed(query)
-        kwargs = {"vector": embedding, "top_k": top_k, "include_metadata": True}
+        kwargs = {
+            "namespace":        "operations",
+            "query":            {"top_k": top_k, "inputs": {"text": query}},
+            "fields":           ["symbol", "action", "lot_size", "price_open",
+                                 "price_close", "result_usd", "status", "date",
+                                 "reason", "ticket"],
+            "rerank":           {"model": "bge-reranker-v2-m3",
+                                 "top_n": top_k,
+                                 "rank_fields": ["text"]},
+        }
         if filter_by:
-            kwargs["filter"] = filter_by
+            kwargs["query"]["filter"] = filter_by
 
-        response = self.index.query(**kwargs)
+        response = self.index.search(**kwargs)
         results  = []
-        for match in response.get("matches", []):
-            entry = {"score": round(match["score"], 4), "id": match["id"]}
-            entry.update(match.get("metadata", {}))
+        for hit in response.get("result", {}).get("hits", []):
+            entry = {
+                "score": round(hit.get("_score", 0), 4),
+                "id":    hit.get("_id"),
+            }
+            entry.update(hit.get("fields", {}))
             results.append(entry)
         return results
 
     def get_recent_operations(self, limit: int = 10) -> list[dict]:
         """
-        Recupera las operaciones más recientes usando búsqueda
-        semántica con contexto de trading general.
+        Recupera operaciones recientes usando búsqueda semántica general.
         """
         return self.query_similar(
-            query="operación de trading reciente BUY SELL resultado",
+            query="operación de trading reciente BUY SELL resultado precio",
             top_k=limit,
         )
 
     def get_stats_context(self) -> str:
         """
-        Devuelve un resumen textual del historial reciente para
-        pasárselo como contexto al modelo de IA.
+        Devuelve un resumen textual del historial para pasárselo
+        como contexto al modelo de IA.
         """
         ops = self.get_recent_operations(limit=15)
         if not ops:
             return "Sin historial de operaciones en Pinecone."
 
-        lines = ["=== Historial reciente (Pinecone) ==="]
+        lines = ["=== Historial reciente (Pinecone / llama-text-embed-v2) ==="]
         for op in ops:
-            result = f"USD {op.get('result_usd', 'N/A')}" if op.get("result_usd") else "abierta"
+            result_str = f"USD {op['result_usd']}" if op.get("result_usd") else "abierta"
             lines.append(
-                f"  [{op.get('date', '')[:10]}] {op.get('action','')} {op.get('symbol','')} "
-                f"@ {op.get('price_open','')} | {op.get('status','')} | Resultado: {result} "
-                f"| Similitud: {op.get('score', '')}"
+                f"  [{str(op.get('date', ''))[:10]}] {op.get('action','')} "
+                f"{op.get('symbol','')} @ {op.get('price_open','')} "
+                f"| {op.get('status','')} | Resultado: {result_str} "
+                f"| Score: {op.get('score', '')}"
             )
         return "\n".join(lines)
