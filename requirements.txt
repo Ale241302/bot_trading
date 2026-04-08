@@ -14,7 +14,8 @@ notion-client==2.2.1
 pinecone>=3.2.2
 
 # Contexto externo de mercado
-finnhub-python>=2.4.20      # pip install finnhub-python  (nombre correcto en PyPI)
+yfinance>=0.2.54            # velas históricas EURUSD gratis (reemplaza Finnhub candles)
+finnhub-python>=2.4.20      # se mantiene por compatibilidad (solo usado como fallback)
 jb-news>=2.2.4              # pip install jb-news  (calendario económico jblanked)
 
 # Utilidades

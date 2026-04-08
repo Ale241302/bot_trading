@@ -4,18 +4,24 @@ market_context.py
 Contexto externo de mercado — Estrategia ASM
 
 Fuentes (todas FREE):
-  1. Finnhub /forex/candle  → velas M1 + RSI/MACD calculados localmente
-  2. Myfxbook login API     → sesión autenticada → % long/short EURUSD
-  3. Alpha Vantage          → NEWS_SENTIMENT (FOREX:EUR)
-  4. jblanked MQL5          → calendario económico (con key)
+  1. yfinance EURUSD=X       → velas M1 + RSI/MACD calculados localmente (sin API key)
+  2. Myfxbook login API      → sesión autenticada → % long/short EURUSD
+  3. Alpha Vantage           → NEWS_SENTIMENT (FOREX:EUR)
+  4. jblanked MQL5           → calendario económico (con key)
 ================================================
 """
 
 import os
 import math
 import requests
-from urllib.parse import urlencode, quote, unquote
+from urllib.parse import quote, unquote
 from datetime import datetime, timezone, timedelta
+
+try:
+    import yfinance as yf
+    YFINANCE_OK = True
+except ImportError:
+    YFINANCE_OK = False
 
 try:
     from jb_news import JBNews
@@ -26,21 +32,19 @@ except ImportError:
 
 def _safe_encode(token: str) -> str:
     """
-    Codifica un token de sesión de Myfxbook de forma segura.
     Myfxbook devuelve el session token ya parcialmente encoded
-    (ej: 'YgE6H%2Babc' donde %2B = '+', %2F = '/').
-    Si se pasa directamente a quote(), el '%' se re-encodea a '%25',
-    produciendo 'YgE6H%252Babc' — Myfxbook responde 'Invalid session'.
-    Solución: unquote() primero para obtener el token limpio, luego quote().
+    (ej: 'Ok%2BVL...' donde %2B = '+', %3D = '=').
+    unquote() primero para obtener el token limpio, luego quote().
+    Evita doble encoding (%25xx).
     """
     return quote(unquote(token), safe='')
 
 
 class MarketContext:
-    NEWS_BLOCK_MINUTES  = 30
-    FINNHUB_SYMBOL      = "OANDA:EUR_USD"
-    MFX_LOGIN_URL       = "https://www.myfxbook.com/api/login.json"
-    MFX_OUTLOOK_URL     = "https://www.myfxbook.com/api/get-community-outlook.json"
+    NEWS_BLOCK_MINUTES = 30
+    MFX_LOGIN_URL      = "https://www.myfxbook.com/api/login.json"
+    MFX_OUTLOOK_URL    = "https://www.myfxbook.com/api/get-community-outlook.json"
+    YF_SYMBOL          = "EURUSD=X"
 
     def __init__(self):
         self.finnhub_key  = os.getenv("FINNHUB_API_KEY", "")
@@ -57,7 +61,7 @@ class MarketContext:
         self._cache: dict = {}
         self._cache_ttl   = 55
 
-    # ── Cache ────────────────────────────────────────────────
+    # ── Cache ────────────────────────────────────────────────────
 
     def _cache_get(self, key):
         e = self._cache.get(key)
@@ -111,7 +115,7 @@ class MarketContext:
         hist = macd_line[-1] - signal[-1]
         return round(macd_line[-1], 6), round(signal[-1], 6), round(hist, 6)
 
-    # ── 1. Finnhub /forex/candle + RSI/MACD propios ───────────────────
+    # ── 1. yfinance → velas M1 EURUSD (GRATIS, sin API key) ──────
 
     def get_technical_signal(self) -> dict:
         cached = self._cache_get("technical")
@@ -121,43 +125,38 @@ class MarketContext:
         result = {
             "rsi": None, "macd_signal": None, "macd_hist": None,
             "candle_trend": None, "last_price": None,
-            "high": None, "low": None, "error": None
+            "high": None, "low": None, "source": None, "error": None
         }
 
-        if not self.finnhub_key:
-            result["error"] = "FINNHUB_API_KEY no configurada"
+        if not YFINANCE_OK:
+            result["error"] = "yfinance no instalado — corre: pip install yfinance"
             self._cache_set("technical", result)
             return result
 
-        now_ts  = int(datetime.now(timezone.utc).timestamp())
-        from_ts = now_ts - 7200
-
         try:
-            r = requests.get(
-                "https://finnhub.io/api/v1/forex/candle",
-                params={
-                    "symbol": self.FINNHUB_SYMBOL, "resolution": "1",
-                    "from": from_ts, "to": now_ts,
-                    "token": self.finnhub_key
-                },
-                timeout=8,
-            )
-            if r.status_code != 200:
-                result["error"] = f"Finnhub /forex/candle HTTP {r.status_code}: {r.text[:120]}"
+            ticker = yf.Ticker(self.YF_SYMBOL)
+            # period="1d" interval="1m" → ~390 velas del día actual (mercado abierto)
+            df = ticker.history(period="1d", interval="1m")
+
+            if df is None or df.empty:
+                # Fallback: últimas 5 días para asegurar datos (fin de semana)
+                df = ticker.history(period="5d", interval="5m")
+
+            if df is None or df.empty:
+                result["error"] = "yfinance: sin datos (mercado cerrado o símbolo inválido)"
                 self._cache_set("technical", result)
                 return result
 
-            candles = r.json()
-            closes  = candles.get("c", [])
-            highs   = candles.get("h", [])
-            lows    = candles.get("l", [])
-            status  = candles.get("s", "")
+            closes = df["Close"].dropna().tolist()
+            highs  = df["High"].dropna().tolist()
+            lows   = df["Low"].dropna().tolist()
 
-            if status == "no_data" or not closes:
-                result["error"] = "Finnhub: sin datos de velas (mercado cerrado o fuera de horario)"
+            if not closes:
+                result["error"] = "yfinance: lista de cierres vacía"
                 self._cache_set("technical", result)
                 return result
 
+            result["source"]     = "yfinance"
             result["last_price"] = round(closes[-1], 5)
             result["high"]       = round(max(highs[-20:]), 5) if highs else None
             result["low"]        = round(min(lows[-20:]),  5) if lows  else None
@@ -173,16 +172,12 @@ class MarketContext:
                 result["macd_hist"]   = hist
 
         except Exception as e:
-            result["error"] = str(e)
+            result["error"] = f"yfinance excepción: {e}"
 
         self._cache_set("technical", result)
         return result
 
-    # ── 2. Myfxbook login → sesión → outlook EURUSD ─────────────────
-    #
-    #  IMPORTANTE: Myfxbook devuelve el session token ya parcialmente
-    #  encoded (ej: 'YgE6H%2Babc'). Usar _safe_encode() que hace
-    #  unquote() + quote() para evitar doble encoding (%25xx).
+    # ── 2. Myfxbook login → sesión → outlook EURUSD ───────────────
 
     def _mfx_get_session(self):
         if self._mfx_session:
@@ -220,7 +215,6 @@ class MarketContext:
             return result
 
         try:
-            # _safe_encode: unquote() + quote() para evitar doble %25xx
             url = f"{self.MFX_OUTLOOK_URL}?session={_safe_encode(session)}"
             r   = requests.get(url, timeout=10)
 
@@ -231,7 +225,7 @@ class MarketContext:
 
             data = r.json()
             if data.get("error"):
-                # Sesión inválida — limpiar caché y reintentar una vez
+                # Sesión inválida — limpiar y reintentar una vez
                 self._mfx_session = None
                 session2 = self._mfx_get_session()
                 if session2:
@@ -271,7 +265,7 @@ class MarketContext:
         self._cache_set("myfxbook", result)
         return result
 
-    # ── 3. Alpha Vantage: NEWS_SENTIMENT ─────────────────────────────
+    # ── 3. Alpha Vantage: NEWS_SENTIMENT ─────────────────────────
 
     def get_av_sentiment(self) -> dict:
         cached = self._cache_get("av_sentiment")
@@ -329,7 +323,7 @@ class MarketContext:
         self._cache_set("av_sentiment", result)
         return result
 
-    # ── 4. jblanked: calendario económico MQL5 ───────────────────────
+    # ── 4. jblanked: calendario económico MQL5 ───────────────────
 
     def get_news_calendar(self) -> list:
         cached = self._cache_get("news")
@@ -375,7 +369,7 @@ class MarketContext:
         self._cache_set("news", events)
         return events
 
-    # ── Bloqueo por noticias ───────────────────────────────────────
+    # ── Bloqueo por noticias ──────────────────────────────────────
 
     def should_hold_news(self) -> tuple:
         events = self.get_news_calendar()
@@ -400,13 +394,14 @@ class MarketContext:
                 )
         return False, ""
 
-    # ── Texto para el prompt ───────────────────────────────────────
+    # ── Texto para el prompt ──────────────────────────────────────
 
     def get_context_text(self) -> str:
         lines = ["=== CONTEXTO EXTERNO DE MERCADO ==="]
 
         tech = self.get_technical_signal()
-        lines.append("  [Técnico — Finnhub /forex/candle + RSI/MACD calculados]")
+        src  = tech.get("source", "yfinance")
+        lines.append(f"  [Técnico — {src} velas M1 + RSI/MACD calculados]")
         if tech["error"]:
             lines.append(f"    ⚠ {tech['error']}")
         else:
