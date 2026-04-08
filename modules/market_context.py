@@ -14,7 +14,7 @@ Fuentes (todas FREE):
 import os
 import math
 import requests
-from urllib.parse import urlencode, quote
+from urllib.parse import urlencode, quote, unquote
 from datetime import datetime, timezone, timedelta
 
 try:
@@ -22,6 +22,18 @@ try:
     JBNEWS_OK = True
 except ImportError:
     JBNEWS_OK = False
+
+
+def _safe_encode(token: str) -> str:
+    """
+    Codifica un token de sesión de Myfxbook de forma segura.
+    Myfxbook devuelve el session token ya parcialmente encoded
+    (ej: 'YgE6H%2Babc' donde %2B = '+', %2F = '/').
+    Si se pasa directamente a quote(), el '%' se re-encodea a '%25',
+    produciendo 'YgE6H%252Babc' — Myfxbook responde 'Invalid session'.
+    Solución: unquote() primero para obtener el token limpio, luego quote().
+    """
+    return quote(unquote(token), safe='')
 
 
 class MarketContext:
@@ -168,10 +180,9 @@ class MarketContext:
 
     # ── 2. Myfxbook login → sesión → outlook EURUSD ─────────────────
     #
-    #  IMPORTANTE: el token de sesión puede contener '/' y otros caracteres
-    #  especiales. Si se pasa via params={}, requests lo re-encodea a %2F
-    #  y Myfxbook responde "Invalid session". Por eso construimos la URL
-    #  manualmente con quote(session, safe='') para un solo nivel de encoding.
+    #  IMPORTANTE: Myfxbook devuelve el session token ya parcialmente
+    #  encoded (ej: 'YgE6H%2Babc'). Usar _safe_encode() que hace
+    #  unquote() + quote() para evitar doble encoding (%25xx).
 
     def _mfx_get_session(self):
         if self._mfx_session:
@@ -179,11 +190,10 @@ class MarketContext:
         if not self.mfx_email or not self.mfx_password:
             return None
         try:
-            # Login: email y password también pueden tener caracteres especiales
             url = (
                 f"{self.MFX_LOGIN_URL}"
-                f"?email={quote(self.mfx_email, safe='')}"
-                f"&password={quote(self.mfx_password, safe='')}"
+                f"?email={_safe_encode(self.mfx_email)}"
+                f"&password={_safe_encode(self.mfx_password)}"
             )
             r = requests.get(url, timeout=10)
             if r.status_code == 200:
@@ -210,8 +220,8 @@ class MarketContext:
             return result
 
         try:
-            # Construir URL manualmente para evitar doble encoding del token
-            url = f"{self.MFX_OUTLOOK_URL}?session={quote(session, safe='')}"
+            # _safe_encode: unquote() + quote() para evitar doble %25xx
+            url = f"{self.MFX_OUTLOOK_URL}?session={_safe_encode(session)}"
             r   = requests.get(url, timeout=10)
 
             if r.status_code != 200:
@@ -219,13 +229,13 @@ class MarketContext:
                 self._cache_set("myfxbook", result)
                 return result
 
-            data    = r.json()
+            data = r.json()
             if data.get("error"):
                 # Sesión inválida — limpiar caché y reintentar una vez
                 self._mfx_session = None
                 session2 = self._mfx_get_session()
                 if session2:
-                    url2 = f"{self.MFX_OUTLOOK_URL}?session={quote(session2, safe='')}"
+                    url2 = f"{self.MFX_OUTLOOK_URL}?session={_safe_encode(session2)}"
                     r    = requests.get(url2, timeout=10)
                     data = r.json() if r.status_code == 200 else {}
 

@@ -19,6 +19,10 @@ WRN = "\033[93m[WARN]\033[0m"
 def sep(title):
     print(f"\n{'='*50}\n  {title}\n{'='*50}")
 
+def _safe_encode(token: str) -> str:
+    """unquote() + quote() para evitar doble encoding de tokens Myfxbook."""
+    return quote(unquote(token), safe='')
+
 # ── 1. Variables de entorno ────────────────────────────────────
 sep("1. Variables de entorno")
 
@@ -48,7 +52,7 @@ sep("2. Finnhub (precio EURUSD)")
 try:
     key = os.getenv("FINNHUB_API_KEY", "")
     if not key:
-        print(f"  {ERR} FINNHUB_API_KEY vacia — ve a https://finnhub.io/register")
+        print(f"  {ERR} FINNHUB_API_KEY vacia")
     else:
         now_ts  = int(datetime.now(timezone.utc).timestamp())
         from_ts = now_ts - 3600
@@ -65,26 +69,23 @@ try:
             if closes:
                 print(f"  {OK} /forex/candle OK — {len(closes)} velas | cierre: {closes[-1]:.5f}")
             else:
-                print(f"  {WRN} /forex/candle: sin velas (status={status}) — mercado cerrado?")
+                print(f"  {WRN} /forex/candle: sin velas (status={status})")
         elif r.status_code == 403:
             print(f"  {WRN} /forex/candle: 403 — plan Free no incluye velas historicas")
-            print(f"       Usando /quote como alternativa (precio actual, siempre FREE)...")
             r2 = requests.get(
                 "https://finnhub.io/api/v1/quote",
                 params={"symbol": "OANDA:EUR_USD", "token": key},
                 timeout=8,
             )
             if r2.status_code == 200:
-                q  = r2.json()
-                c  = q.get("c", 0)
-                h  = q.get("h", 0)
-                l  = q.get("l", 0)
-                pc = q.get("pc", 0)
+                q = r2.json()
+                c = q.get("c", 0)
                 if c:
+                    pc = q.get("pc", 0)
                     cambio = round(((c - pc) / pc) * 100, 4) if pc else 0
-                    print(f"  {OK} /quote (FREE) — EURUSD: {c:.5f} | H:{h:.5f} L:{l:.5f} | cambio: {cambio:+.4f}%")
+                    print(f"  {OK} /quote EURUSD: {c:.5f} | cambio: {cambio:+.4f}%")
                 else:
-                    print(f"  {WRN} /quote retorno precio 0 (mercado cerrado?)")
+                    print(f"  {WRN} /quote precio 0 (mercado cerrado?)")
             else:
                 print(f"  {ERR} /quote HTTP {r2.status_code}: {r2.text[:100]}")
         else:
@@ -102,62 +103,50 @@ try:
     else:
         login_url = (
             f"https://www.myfxbook.com/api/login.json"
-            f"?email={quote(email, safe='')}&password={quote(pwd, safe='')}"
+            f"?email={_safe_encode(email)}&password={_safe_encode(pwd)}"
         )
         r    = requests.get(login_url, timeout=10)
         data = r.json() if r.status_code == 200 else {}
 
         if not data.get("error", True):
             session_raw = data.get("session", "")
-            # FIX: Myfxbook devuelve el token ya parcialmente encoded (ej: 0t%2FRny...)
-            # Si se pasa directo a quote(), el %2F se convierte en %252F (doble encoding).
-            # Solucion: unquote() primero para obtener el token limpio, luego quote().
-            session_clean = unquote(session_raw)
-            session_encoded = quote(session_clean, safe='')
-            print(f"  {OK} Login exitoso | session_raw = {session_raw[:10]}...")
-            print(f"  [DEBUG] session_clean    = {session_clean[:10]}...")
-            print(f"  [DEBUG] session_encoded  = {session_encoded[:10]}...")
+            session_enc = _safe_encode(session_raw)
+            print(f"  {OK} Login exitoso")
+            print(f"  [DEBUG] session_raw = {session_raw[:12]}...")
+            print(f"  [DEBUG] session_enc = {session_enc[:12]}...")
 
             outlook_url = (
                 f"https://www.myfxbook.com/api/get-community-outlook.json"
-                f"?session={session_encoded}"
+                f"?session={session_enc}"
             )
             r2    = requests.get(outlook_url, timeout=10)
             body2 = r2.json() if r2.status_code == 200 else {}
             syms  = body2.get("symbols", [])
-            print(f"  [DEBUG] get-community-outlook symbols count: {len(syms)}")
+            print(f"  [DEBUG] symbols count: {len(syms)}")
 
             if syms:
                 names = [s.get("name") for s in syms[:8]]
-                print(f"  [DEBUG] Simbolos disponibles: {names}")
+                print(f"  [DEBUG] Simbolos: {names}")
                 eurusd = next(
                     (s for s in syms
-                     if "EUR" in str(s.get("name", "")).upper()
-                     and "USD" in str(s.get("name", "")).upper()),
+                     if "EUR" in str(s.get("name","")).upper()
+                     and "USD" in str(s.get("name","")).upper()),
                     None
                 )
                 if eurusd:
                     l_pct = eurusd.get('longPercentage',  eurusd.get('longVolume',  '?'))
                     s_pct = eurusd.get('shortPercentage', eurusd.get('shortVolume', '?'))
-                    print(f"  {OK} EURUSD: long={l_pct}%  short={s_pct}%")
+                    print(f"  {OK} EURUSD community outlook: long={l_pct}%  short={s_pct}%")
                 else:
                     print(f"  {WRN} EURUSD no encontrado entre: {names}")
             else:
                 err_msg = body2.get('message', 'sin mensaje')
                 print(f"  {WRN} symbols vacio | mensaje: {err_msg}")
-                print(f"  JSON completo: {json.dumps(body2)[:300]}")
+                print(f"  JSON: {json.dumps(body2)[:300]}")
                 if "Invalid session" in err_msg:
                     print()
-                    print(f"  DIAGNOSTICO: Sigue fallando con unquote()+quote().")
-                    print(f"               El problema es que la cuenta NO tiene portfolio")
-                    print(f"               vinculado en myfxbook.com.")
-                    print()
-                    print(f"  SOLUCION: Ve a https://www.myfxbook.com/connect-metatrader5")
-                    print(f"    1. Login con jorjecasanova@gmail.com")
-                    print(f"    2. My Accounts > Add Account")
-                    print(f"    3. Selecciona MT5 Publisher EA")
-                    print(f"    4. El EA ya esta en tu grafico EURUSD — solo acepta en la web")
-                    print(f"    5. Asegurate que Status = 'Active' (no 'Pending')")
+                    print(f"  POSIBLE CAUSA: La cuenta Myfxbook no tiene cartera vinculada.")
+                    print(f"  Verifica en https://www.myfxbook.com/portfolio que Status=Active")
         else:
             msg = data.get("message", r.text[:150])
             print(f"  {ERR} Login fallido: {msg}")
@@ -201,7 +190,7 @@ try:
         if names:
             print(f"  {OK} Conectado | Indices: {names}")
         else:
-            print(f"  {OK} Conectado | Sin indices aun (se crean al correr el bot)")
+            print(f"  {OK} Conectado | Sin indices aun")
 except Exception as e:
     print(f"  {ERR} Excepcion Pinecone: {e}")
 
