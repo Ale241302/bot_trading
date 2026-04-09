@@ -199,7 +199,7 @@ def step3_read_pinecone(memory: PineconeMemory):
     # Mostrar resumen de contexto tal como lo ve la IA
     section("  Contexto generado para la IA (get_stats_context)")
     try:
-        ctx = memory.get_stats_context()
+        ctx = memory.get_stats_context("EURUSD")
         print(ctx)
         ok("get_stats_context() ejecutado correctamente.")
     except Exception as e:
