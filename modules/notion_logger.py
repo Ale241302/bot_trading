@@ -46,11 +46,29 @@ class NotionLogger:
         if result_usd is not None:
             properties["Resultado (USD)"] = {"number": result_usd}
 
-        self.client.pages.create(
+        response = self.client.pages.create(
             parent={"database_id": self.db_id},
             properties=properties
         )
         print(f"Notion: operacion registrada -> {title}")
+        return response.get("id")
+
+    def update_operation(self, page_id: str, price_close: float, result_usd: float):
+        if not page_id: return
+        properties = {
+            "Estado": {"select": {"name": "Cerrada"}},
+        }
+        if price_close is not None:
+            properties["Precio Cierre"] = {"number": price_close}
+        if result_usd is not None:
+            properties["Resultado (USD)"] = {"number": result_usd}
+            
+        try:
+            self.client.pages.update(page_id=page_id, properties=properties)
+            print(f"Notion: operación {page_id} actualizada a Cerrada.")
+        except Exception as e:
+            print(f"Notion Error actualizando {page_id}: {e}")
+
 
     def get_recent_operations(self, limit: int = 10) -> list:
         response = self.client.databases.query(

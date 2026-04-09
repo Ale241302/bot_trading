@@ -24,6 +24,7 @@ from modules.mt5_connector   import MT5Connector
 from modules.ai_analyst       import AIAnalyst
 from modules.notion_logger    import NotionLogger
 from modules.trader           import Trader
+from modules.trade_monitor    import TradeMonitor
 from modules.pinecone_memory  import PineconeMemory
 from modules.capital_guard    import CapitalGuard
 from modules.market_context   import MarketContext
@@ -58,9 +59,12 @@ def run_bot():
         print("❌ No se pudieron obtener datos de mercado.")
         return
 
+    # ── PASO 3.5: Monitor de operaciones cerradas ────────────────────────────
+    trade_monitor.check_closed_trades()
+
     # ── PASO 4-6: Ensamblar contexto completo para la IA ────────────────────
     history        = notion.get_recent_operations(limit=10)
-    pinecone_ctx   = memory.get_stats_context()
+    pinecone_ctx   = memory.get_stats_context(SYMBOL)
     capital_status = capital.status_text()
     market_ctx     = mktctx.get_context_text()   # Finnhub + jblanked
 
@@ -81,7 +85,7 @@ def run_bot():
         if result:
             lot = float(os.getenv("LOT_SIZE", 0.01))
 
-            notion.log_operation(
+            notion_id = notion.log_operation(
                 symbol=SYMBOL, action=decision["action"],
                 lot_size=lot, price_open=result["price"],
                 reason=decision["reason"],
@@ -91,6 +95,13 @@ def run_bot():
                 lot_size=lot, price_open=result["price"],
                 reason=decision["reason"], ticket=result.get("ticket"),
             )
+            if "ticket" in result:
+                trade_monitor.add_trade(
+                    ticket=result["ticket"], symbol=SYMBOL,
+                    notion_page_id=notion_id, action=decision["action"],
+                    lot_size=lot, price_open=result["price"],
+                    reason=decision["reason"]
+                )
             print("✅ Operación ejecutada y registrada en Notion + Pinecone.")
     else:
         print("⏸️  IA decidió HOLD en este ciclo.")
@@ -107,6 +118,7 @@ if __name__ == "__main__":
     notion  = NotionLogger()
     trader  = Trader(mt5)
     memory  = PineconeMemory()
+    trade_monitor = TradeMonitor(memory, notion)
     capital = CapitalGuard()
     mktctx  = MarketContext()
 

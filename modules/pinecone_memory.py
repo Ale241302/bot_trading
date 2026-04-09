@@ -171,21 +171,22 @@ class PineconeMemory:
             results.append(entry)
         return results
 
-    def get_recent_operations(self, limit: int = 10) -> list[dict]:
+    def get_operations_by_symbol(self, symbol: str, limit: int = 10) -> list[dict]:
         """
-        Recupera operaciones recientes usando búsqueda semántica general.
+        Recupera operaciones recientes analizando especificamente el simbolo provisto.
         """
         return self.query_similar(
-            query="operación de trading reciente BUY SELL resultado precio",
+            query=f"operación de trading reciente BUY SELL resultado precio {symbol}",
             top_k=limit,
+            filter_by={"symbol": {"$eq": symbol}}
         )
 
-    def get_stats_context(self) -> str:
+    def get_stats_context(self, symbol: str) -> str:
         """
         Devuelve un resumen textual del historial para pasárselo
         como contexto al modelo de IA.
         """
-        ops = self.get_recent_operations(limit=15)
+        ops = self.get_operations_by_symbol(symbol=symbol, limit=15)
         if not ops:
             return "Sin historial de operaciones en Pinecone."
 
@@ -199,3 +200,20 @@ class PineconeMemory:
                 f"| Score: {op.get('score', '')}"
             )
         return "\n".join(lines)
+
+    def update_operation(self, ticket: int, symbol: str, action: str, lot_size: float, price_open: float, reason: str, price_close: float, result_usd: float):
+        """
+        Actualiza los datos de resolucion enviando la misma operacion a memoria.
+        El id estara basado en el ticket y pinecone lo actualizara encima.
+        """
+        self.log_operation(
+            symbol=symbol,
+            action=action,
+            lot_size=lot_size,
+            price_open=price_open,
+            reason=reason,
+            price_close=price_close,
+            result_usd=result_usd,
+            status="Cerrada",
+            ticket=ticket
+        )

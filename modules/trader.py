@@ -22,6 +22,12 @@ class Trader:
         action: "BUY" o "SELL"
         Retorna dict con info de la orden o None si falla.
         """
+        # Verificar posiciones abiertas antes de operar
+        positions = mt5.positions_get(symbol=symbol)
+        if positions and len(positions) > 0:
+            print(f"Ya hay {len(positions)} posición(es) abierta(s) en {symbol}. HOLD.")
+            return None
+
         order_type = mt5.ORDER_TYPE_BUY if action == "BUY" else mt5.ORDER_TYPE_SELL
 
         tick = mt5.symbol_info_tick(symbol)
@@ -32,8 +38,12 @@ class Trader:
         price       = tick.ask if action == "BUY" else tick.bid
         symbol_info = mt5.symbol_info(symbol)
         point       = symbol_info.point
-        sl          = round((price - 200 * point) if action == "BUY" else (price + 200 * point), symbol_info.digits)
-        tp          = round((price + 400 * point) if action == "BUY" else (price - 400 * point), symbol_info.digits)
+        
+        # Leer modo del capital guard o variables de entorno
+        sl_pips = int(os.getenv("SL_PIPS", 15))
+        tp_pips = int(os.getenv("TP_PIPS", 30))
+        sl = round((price - sl_pips * 10 * point) if action == "BUY" else (price + sl_pips * 10 * point), symbol_info.digits)
+        tp = round((price + tp_pips * 10 * point) if action == "BUY" else (price - tp_pips * 10 * point), symbol_info.digits)
 
         request = {
             "action":       mt5.TRADE_ACTION_DEAL,
