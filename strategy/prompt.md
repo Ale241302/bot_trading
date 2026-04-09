@@ -54,6 +54,12 @@ Revisa las operaciones similares pasadas que te proporcionará el sistema:
 - Si el historial muestra **resultado positivo** con este setup → refuerza la señal
 - Sin historial similar → opera solo si los 3 filtros anteriores son perfectos
 
+## FILTRO 5 — Sentimiento Myfxbook (contra-tendencia)
+- Si `short_pct >= 65%` → señal CONTRA-TENDENCIA BUY (la mayoría apuesta a baja, el mercado suele ir arriba)
+- Si `long_pct >= 65%` → señal CONTRA-TENDENCIA SELL
+- Si NEUTRAL → no suma ni resta a la decisión
+- Este filtro REFUERZA pero no reemplaza los filtros 1-3
+
 ---
 
 # THE SHIELD — Gestión de Capital Progresiva

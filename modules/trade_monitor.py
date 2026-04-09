@@ -50,12 +50,12 @@ class TradeMonitor:
                 price_close = None
                 profit = 0.0
 
-                if deals and len(deals) > 0:
-                    profit = sum([d.profit for d in deals])
-                    price_close = deals[-1].price
-                else:
-                    # Alternativa si deals no trae resultados
-                    pass
+                if not deals or len(deals) == 0:
+                    print(f"Monitor: Sin deals aún para ticket {ticket}, reintentando próximo ciclo.")
+                    continue  # No marcar como cerrado todavía
+                    
+                profit = sum([d.profit for d in deals])
+                price_close = deals[-1].price
 
                 # Actualizar Notion y Pinecone
                 print(f"Monitor: Operación cerrada {ticket}. Actualizando DBs...")

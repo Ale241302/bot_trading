@@ -2,8 +2,8 @@
 trader.py
 ────────────────────────────────────────────
 Ejecutor de ordenes BUY/SELL en MT5.
-  - SL (Stop Loss): 20 pips
-  - TP (Take Profit): 40 pips (ratio 1:2)
+  - SL (Stop Loss): 15 pips
+  - TP (Take Profit): 30 pips (ratio 1:2)
 ────────────────────────────────────────────
 """
 
