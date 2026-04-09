@@ -5,6 +5,10 @@ Módulo de memoria vectorial con Pinecone.
 Usa el índice con embedding INTEGRADO (llama-text-embed-v2 / NVIDIA)
 de manera que Pinecone convierte el texto a vector automáticamente.
 No se necesita OpenAI ni llamadas externas para embeddings.
+
+NOTA: El reranker bge-reranker-v2-m3 fue desactivado porque el plan
+gratuito de Pinecone tiene un límite de 500 requests/mes. La búsqueda
+semántica por similitud coseno es suficiente para el bot.
 ================================================
 """
 
@@ -140,22 +144,16 @@ class PineconeMemory:
         filter_by: dict = None,
     ) -> list[dict]:
         """
-        Búsqueda semántica con texto plano.
-        Pinecone embebe el query automáticamente y busca por similitud coseno.
-
-        Ejemplos:
-            memory.query_similar("BUY EURUSD con resultado positivo")
-            memory.query_similar("SELL GBPUSD pérdida", filter_by={"action": {"$eq": "SELL"}})
+        Búsqueda semántica con texto plano (similitud coseno).
+        Pinecone embebe el query automáticamente.
+        Reranker desactivado: límite gratuito 500 req/mes agotado fácilmente.
         """
         kwargs = {
-            "namespace":        "operations",
-            "query":            {"top_k": top_k, "inputs": {"text": query}},
-            "fields":           ["symbol", "action", "lot_size", "price_open",
-                                 "price_close", "result_usd", "status", "date",
-                                 "reason", "ticket"],
-            "rerank":           {"model": "bge-reranker-v2-m3",
-                                 "top_n": top_k,
-                                 "rank_fields": ["text"]},
+            "namespace": "operations",
+            "query":     {"top_k": top_k, "inputs": {"text": query}},
+            "fields":    ["symbol", "action", "lot_size", "price_open",
+                          "price_close", "result_usd", "status", "date",
+                          "reason", "ticket"],
         }
         if filter_by:
             kwargs["query"]["filter"] = filter_by
@@ -173,7 +171,7 @@ class PineconeMemory:
 
     def get_operations_by_symbol(self, symbol: str, limit: int = 10) -> list[dict]:
         """
-        Recupera operaciones recientes analizando especificamente el simbolo provisto.
+        Recupera operaciones recientes filtrando por símbolo exacto.
         """
         return self.query_similar(
             query=f"operación de trading reciente BUY SELL resultado precio {symbol}",
@@ -203,8 +201,8 @@ class PineconeMemory:
 
     def update_operation(self, ticket: int, symbol: str, action: str, lot_size: float, price_open: float, reason: str, price_close: float, result_usd: float):
         """
-        Actualiza los datos de resolucion enviando la misma operacion a memoria.
-        El id estara basado en el ticket y pinecone lo actualizara encima.
+        Actualiza los datos de resolución enviando la misma operación a memoria.
+        El id está basado en el ticket y Pinecone lo actualiza encima.
         """
         self.log_operation(
             symbol=symbol,
