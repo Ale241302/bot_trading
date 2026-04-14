@@ -10,20 +10,50 @@ Weekly Double Compounding:
 
 from datetime import datetime, timezone, timedelta
 import math
+import json
+import os
 
 class CapitalGuard:
     def __init__(self):
-        self._operations: list[dict] = []  # {"pnl": float, "ts": datetime}
+        self._file_path = "capital_state.json"
+        self._operations: list[dict] = self._load_state()
         self.is_friday_closing = False
+
+    def _now(self) -> datetime:
+        return datetime.now(timezone.utc)
+
+    def _load_state(self) -> list[dict]:
+        if not os.path.exists(self._file_path):
+            return []
+        try:
+            with open(self._file_path, "r") as f:
+                data = json.load(f)
+            now = self._now()
+            threshold = now - timedelta(days=7)
+            ops = []
+            for d in data:
+                ts = datetime.fromisoformat(d["ts"])
+                if ts >= threshold:
+                    ops.append({"pnl": d["pnl"], "ts": ts})
+            return ops
+        except Exception as e:
+            print(f"Error cargando estado de capital: {e}")
+            return []
+
+    def _save_state(self):
+        try:
+            data = [{"pnl": o["pnl"], "ts": o["ts"].isoformat()} for o in self._operations]
+            with open(self._file_path, "w") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            print(f"Error guardando estado: {e}")
 
     def record(self, pnl: float):
         self._operations.append({
             "pnl": pnl,
-            "ts":  datetime.now(timezone.utc),
+            "ts":  self._now(),
         })
-
-    def _now(self) -> datetime:
-        return datetime.now(timezone.utc)
+        self._save_state()
 
     def pnl_day(self) -> float:
         start = self._now().replace(hour=0, minute=0, second=0, microsecond=0)
