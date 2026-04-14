@@ -38,9 +38,10 @@ class AIAnalyst:
         symbol:           str,
         candles:          pd.DataFrame,
         history:          list,
+        open_positions:   list,      # ← nuevo: tickets activos
         pinecone_context: str = "",
         capital_status:   str = "",
-        market_context:   str = "",   # ← nuevo: Finnhub + jblanked
+        market_context:   str = "",
     ) -> dict:
         """
         Ensambla el user_message con todos los bloques de contexto
@@ -58,6 +59,19 @@ class AIAnalyst:
 
         # Construir bloques opcionales (solo si tienen contenido)
         blocks = [f"Símbolo: {symbol}"]
+
+        positions_text = "Sin posiciones abiertas actualmente."
+        if open_positions and len(open_positions) > 0:
+            pos_lines = []
+            for p in open_positions:
+                pos_lines.append(
+                    f"- Ticket: {p.ticket} | Tipo: {'BUY' if p.type == 0 else 'SELL'} "
+                    f"| Volumen: {p.volume} | Open: {p.price_open} | SL: {p.sl} | TP: {p.tp} "
+                    f"| Profit Actual: {p.profit}"
+                )
+            positions_text = "\n".join(pos_lines)
+            
+        blocks.append(f"Posiciones Abiertas (Tickets Reales):\n{positions_text}")
 
         if capital_status:
             blocks.append(capital_status)
