@@ -5,6 +5,7 @@ Conexion con MetaTrader 5:
   - Conectar y desconectar
   - Obtener velas historicas (OHLCV)
   - Consultar posiciones abiertas
+  - Consultar ordenes pendientes
 ────────────────────────────────────────────
 """
 
@@ -52,5 +53,35 @@ class MT5Connector:
         return df[["time", "open", "high", "low", "close", "tick_volume"]]
 
     def get_open_positions(self, symbol: str = None):
+        """Retorna lista de posiciones abiertas (ejecutadas)."""
         positions = mt5.positions_get(symbol=symbol) if symbol else mt5.positions_get()
         return positions if positions else []
+
+    def get_pending_orders(self, symbol: str = None) -> list:
+        """
+        Retorna lista de ordenes pendientes activas (BUY_LIMIT, SELL_LIMIT,
+        BUY_STOP, SELL_STOP) aun no ejecutadas.
+        Cada elemento tiene: ticket, type, symbol, volume, price_open, sl, tp.
+        """
+        orders = mt5.orders_get(symbol=symbol) if symbol else mt5.orders_get()
+        if not orders:
+            return []
+
+        type_map = {
+            mt5.ORDER_TYPE_BUY_LIMIT:  "BUY_LIMIT",
+            mt5.ORDER_TYPE_SELL_LIMIT: "SELL_LIMIT",
+            mt5.ORDER_TYPE_BUY_STOP:   "BUY_STOP",
+            mt5.ORDER_TYPE_SELL_STOP:  "SELL_STOP",
+        }
+        result = []
+        for o in orders:
+            result.append({
+                "ticket":     o.ticket,
+                "type":       type_map.get(o.type, f"TYPE_{o.type}"),
+                "symbol":     o.symbol,
+                "volume":     o.volume_initial,
+                "price":      o.price_open,
+                "sl":         o.sl,
+                "tp":         o.tp,
+            })
+        return result

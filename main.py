@@ -35,27 +35,26 @@ def run_bot():
         print("❌ No se pudo obtener información de la cuenta MT5.")
         return
         
-    # Configurar capital base (evita usar el pozo genérico de la cuenta demo por error)
     capital_techo = float(os.getenv("CAPITAL_TRABAJO", 50))
     capital_activo = min(capital_techo, acc_info.balance)
     if capital_techo < acc_info.balance:
         print(f"💼 Usando CAPITAL_TRABAJO límite: ${capital_techo} (Ignorando balance demo de ${acc_info.balance})")
 
-    # ── PASO 1: CapitalGuard ─────────────────────────────────────────────────
+    # ── PASO 1: CapitalGuard ───────────────────────────────────────
     can_trade, guard_reason = capital.should_trade(capital_activo)
     print(f"💰 Capital Guard : {guard_reason}")
     if not can_trade:
         print("⏸️  Capital Guard bloqueó el ciclo.")
         return
 
-    # ── PASO 2: Bloqueo por noticias de alto impacto ─────────────────────────
+    # ── PASO 2: Bloqueo por noticias ────────────────────────────
     hold_news, news_reason = mktctx.should_hold_news()
     if hold_news:
         print(f"🚨 News Block     : {news_reason}")
         print("⏸️  Noticia de alto impacto próxima. No se llama a la IA.")
         return
 
-    # ── PASO 3: Datos de mercado y posiciones MT5 ────────────────────────────
+    # ── PASO 3: Datos de mercado y posiciones MT5 ────────────────
     count_candles = int(os.getenv("CANDLES_HISTORY", 50))
     candles_m15 = mt5.get_candles(SYMBOL, count=count_candles, timeframe=mt5_api.TIMEFRAME_M15)
     candles_h1  = mt5.get_candles(SYMBOL, count=count_candles, timeframe=mt5_api.TIMEFRAME_H1)
@@ -71,36 +70,41 @@ def run_bot():
         "H4": candles_h4
     }
         
-    open_positions = mt5.get_open_positions(SYMBOL)
+    open_positions  = mt5.get_open_positions(SYMBOL)
+    pending_orders  = mt5.get_pending_orders(SYMBOL)   # <-- nuevo
 
-    # ── PASO 3.5: Monitor de operaciones cerradas ────────────────────────────
+    total_operaciones = len(open_positions) + len(pending_orders)
+    print(f"📊 Posiciones abiertas: {len(open_positions)} | Órdenes pendientes: {len(pending_orders)} | Total: {total_operaciones}")
+
+    # ── PASO 3.5: Monitor de operaciones cerradas ───────────────
     trade_monitor.check_closed_trades()
 
-    # ── PASO 4-6: Ensamblar contexto completo para la IA ────────────────────
+    # ── PASO 4-6: Contexto completo para la IA ──────────────────
     history        = notion.get_recent_operations(limit=10)
     pinecone_ctx   = memory.get_stats_context(SYMBOL)
     capital_status = capital.status_text(capital_activo)
     market_ctx     = mktctx.get_context_text()
 
-    # ── PASO 6: Decisión de la IA ────────────────────────────────────────────
+    # ── PASO 6: Decisión de la IA ───────────────────────────
     decision = ai.analyze(
-        symbol         = SYMBOL,
-        candles        = multi_candles,
-        history        = history,
-        open_positions = open_positions,
+        symbol           = SYMBOL,
+        candles          = multi_candles,
+        history          = history,
+        open_positions   = open_positions,
+        pending_orders   = pending_orders,   # <-- nuevo
         pinecone_context = pinecone_ctx,
-        capital_status = capital_status,
-        market_context = market_ctx,
+        capital_status   = capital_status,
+        market_context   = market_ctx,
     )
     print(f"🤖 IA            : {decision.get('action', 'HOLD')} | {decision.get('reason', '')}")
 
-    # ── PASO 7-8: Ejecutar y registrar ──────────────────────────────────────
+    # ── PASO 7-8: Ejecutar y registrar ───────────────────────
     action = decision.get("action", "HOLD")
     if action != "HOLD":
         symbol_dec = decision.get("symbol", SYMBOL)
         lot    = float(decision.get("lot", 0.01))
         sl_p   = float(decision.get("sl_pips", 15))
-        tp_p   = float(decision.get("tp_pips", 30))
+        tp_p   = float(decision.get("tp_pips", 15))
         price  = decision.get("price")
         ticket = decision.get("ticket")
 
