@@ -110,22 +110,22 @@ class CapitalGuard:
             phase = "ESCUDO (CIERRE TOTAL VIERNES)"
             riesgo = 0.01
             sl_pips = 10
-            tp_pips = 20
+            tp_pips = 10
         elif p_day >= daily_target:
             phase = "ESCUDO"
             riesgo = 0.01
             sl_pips = 10
-            tp_pips = 20
+            tp_pips = 10
         elif p_day >= (daily_target * 0.5):
             phase = "CONSOLIDACION"
             riesgo = 0.015
             sl_pips = 12
-            tp_pips = 24
+            tp_pips = 18
         else:
             phase = "CRECIMIENTO"
             riesgo = 0.02
             sl_pips = 15
-            tp_pips = 30
+            tp_pips = 15
 
         can_trade, reason = self.should_trade(capital_activo)
 
