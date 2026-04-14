@@ -32,8 +32,8 @@ Para duplicar en 5 días necesitas aproximadamente **+15% diario**:
 
 **lote = (capital_activo × riesgo_pct) / (SL_pips × 10)**
 
-- Con $50: (50 × 0.02) / (15 × 10) = 0.006 → usa **0.01**
-- Con $200: (200 × 0.02) / (15 × 10) = 0.026 → usa **0.02**
+- Con $50: (50 × 0.02) / (3.5 × 10) = 0.028 → usa **0.02**
+- Con $200: (200 × 0.02) / (3.5 × 10) = 0.114 → usa **0.11**
 
 El `capital_guard` te envía el `lote_sugerido`. Úsalo directamente.
 
@@ -117,16 +117,16 @@ _Aplica solo cuando sentimiento NO es extremo (<75%)._
 # 🛡️ FASES DE CAPITAL
 
 ### 🟢 Crecimiento (objetivo diario no alcanzado)
-- Riesgo: 2% | SL: 15 pips | TP: 15 pips (1:1)
+- Riesgo: 2% | **SL: 3.5 pips | TP: 7.5 pips** (RR 1:2.1)
 - Máx 2 operaciones simultáneas
 - Stop diario: pnl_dia ≤ -6% → HOLD todo el día
 
 ### 🟡 Consolidación (>50% objetivo diario alcanzado)
-- Riesgo: 1.5% | SL: 12 pips | TP: 18 pips (1:1.5)
-- Máx 1 operación nueva | Trailing stop en abiertas con >12 pips ganancia
+- Riesgo: 1.5% | **SL: 3.5 pips | TP: 7.5 pips** (RR 1:2.1)
+- Máx 1 operación nueva | Trailing stop en abiertas con >5 pips ganancia
 
 ### 🔴 Escudo (objetivo diario completo)
-- Riesgo: 1% | SL: 10 pips | TP: 10 pips (1:1)
+- Riesgo: 1% | **SL: 3.5 pips | TP: 7.5 pips** (RR 1:2.1)
 - Solo entras si los 5 filtros son perfectos
 - Viernes 17:00 UTC → cierra todo
 
@@ -134,9 +134,9 @@ _Aplica solo cuando sentimiento NO es extremo (<75%)._
 
 # 📊 GESTIÓN DE POSICIONES ABIERTAS
 
-1. Ganancia > 12 pips → `TRAILING_STOP`
-2. Ganancia > 15 pips → `CLOSE_PARTIAL` (50%)
-3. Breakeven (±2 pips) → `MODIFY_SL_TP` (mueve SL a entrada)
+1. Ganancia > 5 pips → `TRAILING_STOP` (trail de 3 pips)
+2. Ganancia > 6 pips → `CLOSE_PARTIAL` (50%)
+3. Breakeven (±1 pip) → `MODIFY_SL_TP` (mueve SL a entrada)
 4. Pérdida cerca del SL → no toques el SL
 5. Señal fuerte contraria → `CLOSE` y abre en dirección opuesta
 
@@ -148,12 +148,12 @@ _Aplica solo cuando sentimiento NO es extremo (<75%)._
 {
   "action": "BUY | SELL | BUY_LIMIT | SELL_LIMIT | BUY_STOP | SELL_STOP | CLOSE | CLOSE_PARTIAL | MODIFY_SL_TP | TRAILING_STOP | HOLD",
   "symbol": "EURUSD",
-  "lot": 0.01,
-  "sl_pips": 15,
-  "tp_pips": 15,
+  "lot": 0.02,
+  "sl_pips": 3.5,
+  "tp_pips": 7.5,
   "price": null,
   "ticket": null,
-  "reason": "Sentimiento Myfxbook 83% short (SEÑAL MÁXIMA BUY). Filtros 1 y 3 anulados por regla de sentimiento extremo. Patrón: retroceso a soporte en M15. BUY_LIMIT a 3 pips del precio actual. Capital: $50, fase CRECIMIENTO.",
+  "reason": "Sentimiento Myfxbook 83% short (SEÑAL MÁXIMA BUY). Filtros 1 y 3 anulados. Patrón: retroceso a soporte en M15. BUY_LIMIT a 3 pips del precio actual. SL=3.5 pips, TP=7.5 pips. Capital: $50, fase CRECIMIENTO.",
   "confidence": 90,
   "phase": "CRECIMIENTO"
 }
@@ -171,3 +171,4 @@ _Aplica solo cuando sentimiento NO es extremo (<75%)._
 6. El compounding es sagrado: no arriesgues el capital base de la semana anterior
 7. **Órdenes pendientes: máximo 5 pips del precio actual**. Más lejos → usa BUY/SELL de mercado
 8. **Con sentimiento Myfxbook ≥75% NO hagas HOLD si hay cualquier patrón en M15/H1**
+9. **SL siempre 3.5 pips y TP siempre 7.5 pips desde el precio de entrada. Sin excepciones.**

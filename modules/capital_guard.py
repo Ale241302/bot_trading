@@ -14,6 +14,10 @@ import json
 import os
 
 class CapitalGuard:
+    # SL y TP fijos para todas las fases (en pips)
+    SL_PIPS = 3.5
+    TP_PIPS = 7.5
+
     def __init__(self):
         self._file_path = "capital_state.json"
         self._operations: list[dict] = self._load_state()
@@ -81,55 +85,43 @@ class CapitalGuard:
         now = self._now()
         is_friday_late = now.weekday() == 4 and now.hour >= 17
 
-        # Max loss checks
         max_daily_loss = capital_activo * 0.06
         if p_day <= -max_daily_loss:
-            can_trade = False
-            reason = f"Max loss diario superado (-{max_daily_loss:.2f})"
+            return False, f"Max loss diario superado (-{max_daily_loss:.2f})"
         elif is_friday_late:
-            can_trade = False
-            reason = "Cierre de viernes > 17:00 UTC."
+            return False, "Cierre de viernes > 17:00 UTC."
         else:
-            can_trade = True
-            reason = "Condiciones normales"
-
-        return can_trade, reason
+            return True, "Condiciones normales"
 
     def status_text(self, capital_activo: float) -> str:
         base, target = self._get_base_and_target(capital_activo)
         daily_target = base / 5.0
         p_day = self.pnl_day()
         p_week = self.pnl_week()
-        
-        now = self._now()
-        is_friday = now.weekday() == 4
-        is_friday_late = is_friday and now.hour >= 17
 
-        # Determinar Fase
+        now = self._now()
+        is_friday_late = now.weekday() == 4 and now.hour >= 17
+
+        # Determinar Fase (SL/TP son fijos en todas las fases)
         if is_friday_late:
             phase = "ESCUDO (CIERRE TOTAL VIERNES)"
             riesgo = 0.01
-            sl_pips = 10
-            tp_pips = 10
         elif p_day >= daily_target:
             phase = "ESCUDO"
             riesgo = 0.01
-            sl_pips = 10
-            tp_pips = 10
         elif p_day >= (daily_target * 0.5):
             phase = "CONSOLIDACION"
             riesgo = 0.015
-            sl_pips = 12
-            tp_pips = 18
         else:
             phase = "CRECIMIENTO"
             riesgo = 0.02
-            sl_pips = 15
-            tp_pips = 15
+
+        sl_pips = self.SL_PIPS
+        tp_pips = self.TP_PIPS
 
         can_trade, reason = self.should_trade(capital_activo)
 
-        # Lote dinamico: lote = (capital_activo * riesgo) / (sl_pips * 10)
+        # Lote dinámico: lote = (capital_activo * riesgo) / (sl_pips * 10)
         lote_calc = (capital_activo * riesgo) / (sl_pips * 10)
         lote_sugerido = max(0.01, round(lote_calc, 2))
 
