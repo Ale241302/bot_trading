@@ -36,7 +36,7 @@ class AIAnalyst:
     def analyze(
         self,
         symbol:           str,
-        candles:          pd.DataFrame,
+        candles:          dict,       # ← ahora recibe dict con M15, H1, H4
         history:          list,
         open_positions:   list,      # ← nuevo: tickets activos
         pinecone_context: str = "",
@@ -47,7 +47,14 @@ class AIAnalyst:
         Ensambla el user_message con todos los bloques de contexto
         y llama a OpenAI para obtener la decisión.
         """
-        candles_text = candles.tail(50).to_string(index=False)
+        # Convertir a cadena solo 20 velas de cada timeframe para ahorrar tokens
+        candles_text = ""
+        if "M15" in candles and candles["M15"] is not None:
+            candles_text += "--- Velas M15 ---\n" + candles["M15"].tail(20).to_string(index=False) + "\n\n"
+        if "H1" in candles and candles["H1"] is not None:
+            candles_text += "--- Velas H1 ---\n" + candles["H1"].tail(20).to_string(index=False) + "\n\n"
+        if "H4" in candles and candles["H4"] is not None:
+            candles_text += "--- Velas H4 ---\n" + candles["H4"].tail(20).to_string(index=False) + "\n"
 
         history_text = "Sin operaciones previas."
         if history:
@@ -79,7 +86,7 @@ class AIAnalyst:
         if market_context:
             blocks.append(market_context)
 
-        blocks.append(f"Ultimas 50 velas OHLCV (M1, más reciente al final):\n{candles_text}")
+        blocks.append(f"Velas OHLCV Multi-timeframe (más reciente al final):\n{candles_text}")
         blocks.append(f"Historial de operaciones recientes (Notion):\n{history_text}")
 
         if pinecone_context:

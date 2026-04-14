@@ -34,7 +34,14 @@ def run_bot():
     if not acc_info:
         print("❌ No se pudo obtener información de la cuenta MT5.")
         return
-    capital_activo = acc_info.balance
+        
+    # Validar CAPITAL_TRABAJO
+    capital_trabajo_env = os.getenv("CAPITAL_TRABAJO")
+    if capital_trabajo_env:
+        capital_activo = float(capital_trabajo_env)
+        print(f"💼 Usando CAPITAL_TRABAJO forzado: ${capital_activo} (Balance real: ${acc_info.balance})")
+    else:
+        capital_activo = acc_info.balance
 
     # ── PASO 1: CapitalGuard ─────────────────────────────────────────────────
     can_trade, guard_reason = capital.should_trade(capital_activo)
@@ -51,10 +58,20 @@ def run_bot():
         return
 
     # ── PASO 3: Datos de mercado y posiciones MT5 ────────────────────────────
-    market_data = mt5.get_candles(SYMBOL, count=int(os.getenv("CANDLES_HISTORY", 50)))
-    if market_data is None:
-        print("❌ No se pudieron obtener datos de mercado.")
+    count_candles = int(os.getenv("CANDLES_HISTORY", 50))
+    candles_m15 = mt5.get_candles(SYMBOL, count=count_candles, timeframe=mt5_api.TIMEFRAME_M15)
+    candles_h1  = mt5.get_candles(SYMBOL, count=count_candles, timeframe=mt5_api.TIMEFRAME_H1)
+    candles_h4  = mt5.get_candles(SYMBOL, count=count_candles, timeframe=mt5_api.TIMEFRAME_H4)
+
+    if candles_m15 is None or candles_h1 is None or candles_h4 is None:
+        print("❌ No se pudieron obtener datos de mercado (M15, H1, H4).")
         return
+        
+    multi_candles = {
+        "M15": candles_m15,
+        "H1": candles_h1,
+        "H4": candles_h4
+    }
         
     open_positions = mt5.get_open_positions(SYMBOL)
 
@@ -70,7 +87,7 @@ def run_bot():
     # ── PASO 6: Decisión de la IA ────────────────────────────────────────────
     decision = ai.analyze(
         symbol         = SYMBOL,
-        candles        = market_data,
+        candles        = multi_candles,
         history        = history,
         open_positions = open_positions,
         pinecone_context = pinecone_ctx,
