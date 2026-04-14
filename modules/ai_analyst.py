@@ -94,8 +94,9 @@ class AIAnalyst:
 
         blocks.append(
             'Responde UNICAMENTE con JSON válido:\n'
-            '{"action": "BUY" | "SELL" | "HOLD", '
-            '"reason": "qué filtros ASM se cumplieron, patrón detectado y estado capital"}'
+            '{"action": "BUY|SELL|BUY_LIMIT|SELL_LIMIT|BUY_STOP|SELL_STOP|CLOSE|CLOSE_PARTIAL|MODIFY_SL_TP|TRAILING_STOP|HOLD", '
+            '"symbol": "EURUSD", "lot": 0.01, "sl_pips": 15, "tp_pips": 30, '
+            '"price": null, "ticket": null, "reason": "...", "confidence": 85, "phase": "CRECIMIENTO|CONSOLIDACION|ESCUDO"}'
         )
 
         user_message = "\n\n".join(blocks)

@@ -35,13 +35,11 @@ def run_bot():
         print("❌ No se pudo obtener información de la cuenta MT5.")
         return
         
-    # Validar CAPITAL_TRABAJO
-    capital_trabajo_env = os.getenv("CAPITAL_TRABAJO")
-    if capital_trabajo_env:
-        capital_activo = float(capital_trabajo_env)
-        print(f"💼 Usando CAPITAL_TRABAJO forzado: ${capital_activo} (Balance real: ${acc_info.balance})")
-    else:
-        capital_activo = acc_info.balance
+    # Configurar capital base (evita usar el pozo genérico de la cuenta demo por error)
+    capital_techo = float(os.getenv("CAPITAL_TRABAJO", 50))
+    capital_activo = min(capital_techo, acc_info.balance)
+    if capital_techo < acc_info.balance:
+        print(f"💼 Usando CAPITAL_TRABAJO límite: ${capital_techo} (Ignorando balance demo de ${acc_info.balance})")
 
     # ── PASO 1: CapitalGuard ─────────────────────────────────────────────────
     can_trade, guard_reason = capital.should_trade(capital_activo)
