@@ -76,6 +76,26 @@ class Trader:
         tick, info = self._get_point_and_tick(symbol)
         if not tick or not target_price: return None
 
+        # Redondear target_price a los decimales exactos del símbolo (fix error 10015)
+        target_price = round(float(target_price), info.digits)
+
+        # Validar que la orden pendiente esté a un precio válido para MT5
+        # BUY_LIMIT debe estar DEBAJO del ask actual; SELL_LIMIT ENCIMA del bid actual
+        is_buy = "BUY" in action
+        current_ref = tick.ask if is_buy else tick.bid
+        min_distance = info.point * 10  # 1 pip mínimo de distancia
+
+        if action == "BUY_LIMIT" and target_price >= tick.ask - min_distance:
+            # Precio demasiado cerca o encima del ask → corregir a 3 pips debajo del bid
+            target_price = round(tick.bid - 3 * 10 * info.point, info.digits)
+        elif action == "SELL_LIMIT" and target_price <= tick.bid + min_distance:
+            # Precio demasiado cerca o debajo del bid → corregir a 3 pips encima del ask
+            target_price = round(tick.ask + 3 * 10 * info.point, info.digits)
+        elif action == "BUY_STOP" and target_price <= tick.ask + min_distance:
+            target_price = round(tick.ask + 3 * 10 * info.point, info.digits)
+        elif action == "SELL_STOP" and target_price >= tick.bid - min_distance:
+            target_price = round(tick.bid - 3 * 10 * info.point, info.digits)
+
         type_map = {
             "BUY_LIMIT": mt5.ORDER_TYPE_BUY_LIMIT,
             "SELL_LIMIT": mt5.ORDER_TYPE_SELL_LIMIT,
@@ -83,7 +103,6 @@ class Trader:
             "SELL_STOP": mt5.ORDER_TYPE_SELL_STOP
         }
         order_type = type_map[action]
-        is_buy = "BUY" in action
         
         sl = round((target_price - sl_pips * 10 * info.point) if is_buy else (target_price + sl_pips * 10 * info.point), info.digits)
         tp = round((target_price + tp_pips * 10 * info.point) if is_buy else (target_price - tp_pips * 10 * info.point), info.digits)
@@ -105,6 +124,7 @@ class Trader:
             print(f"[{action}] Falló: {res.retcode} - {res.comment}")
             return None
             
+        print(f"[{action}] Éxito | Tkt: {res.order} | Precio: {target_price} | SL: {sl} | TP: {tp}")
         return {"ticket": res.order, "price": target_price, "sl": sl, "tp": tp}
 
     def _execute_close(self, ticket: int) -> dict | None:
@@ -142,7 +162,6 @@ class Trader:
         tick, info = self._get_point_and_tick(pos.symbol)
         if not tick: return None
         
-        # Cierra el 50% de la posicion actual
         close_vol = max(0.01, round(pos.volume / 2.0, 2))
         if close_vol >= pos.volume:
             return self._execute_close(ticket)
@@ -200,11 +219,9 @@ class Trader:
         is_buy = pos.type == mt5.ORDER_TYPE_BUY
         current_price = tick.bid if is_buy else tick.ask
         
-        # Mover SL 10 pips detrás del precio actual
         trail_pips = 10
         new_sl = round((current_price - trail_pips * 10 * info.point) if is_buy else (current_price + trail_pips * 10 * info.point), info.digits)
         
-        # Check if the new SL is actually better for the trade before moving it
         if is_buy and new_sl <= pos.sl:
             return None
         if not is_buy and pos.sl > 0 and new_sl >= pos.sl:
