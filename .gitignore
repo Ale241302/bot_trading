@@ -15,3 +15,6 @@ logs/
 # IDEs
 .vscode/
 .idea/
+
+# Estado local WDC
+capital_state.json
