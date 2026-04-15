@@ -1,10 +1,14 @@
 """
 capital_guard.py
 ================================================
-Guardián de capital progresivo — Estrategia WDC
+Guardián de capital progresivo — Estrategia WDC Híbrida
 Weekly Double Compounding:
 - Duplicar el capital semanalmente (50 -> 100 -> 200).
 - Lote sugerido dinámico por fase.
+
+Cambios versión híbrida:
+  SL: 3.5 pips  ->  8.0 pips  (absorbe spread retail + slippage + latencia GPT)
+  TP: 7.5 pips  -> 16.0 pips  (mantiene RR 1:2 estricto)
 ================================================
 """
 
@@ -14,9 +18,9 @@ import json
 import os
 
 class CapitalGuard:
-    # SL y TP fijos para todas las fases (en pips)
-    SL_PIPS = 3.5
-    TP_PIPS = 7.5
+    # SL y TP fijos para todas las fases (en pips) — Estrategia Híbrida
+    SL_PIPS = 8.0
+    TP_PIPS = 16.0
 
     def __init__(self):
         self._file_path = "capital_state.json"
@@ -126,13 +130,13 @@ class CapitalGuard:
         lote_sugerido = max(0.01, round(lote_calc, 2))
 
         return (
-            f"=== ESTADO WDC ===\n"
+            f"=== ESTADO WDC (ESTRATEGIA HÍBRIDA) ===\n"
             f"  Capital Activo  : ${capital_activo:.2f} (Base semanal: ${base}, Objetivo: ${target})\n"
             f"  PNL Día         : ${p_day:.2f} (Objetivo diario: ${daily_target:.2f})\n"
             f"  PNL Semana      : ${p_week:.2f}\n"
             f"  Fase Actual     : {phase}\n"
             f"  Riesgo Permitido: {riesgo*100}%\n"
             f"  Lote Sugerido   : {lote_sugerido}\n"
-            f"  SL={sl_pips} pips, TP={tp_pips} pips\n"
+            f"  SL={sl_pips} pips, TP={tp_pips} pips (RR 1:2)\n"
             f"  Puede operar    : {'SI' if can_trade else 'NO'} ({reason})\n"
         )
