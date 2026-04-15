@@ -219,7 +219,7 @@ class Trader:
         is_buy = pos.type == mt5.ORDER_TYPE_BUY
         current_price = tick.bid if is_buy else tick.ask
         
-        trail_pips = 10
+        trail_pips = 3.5
         new_sl = round((current_price - trail_pips * 10 * info.point) if is_buy else (current_price + trail_pips * 10 * info.point), info.digits)
         
         if is_buy and new_sl <= pos.sl:
