@@ -1,24 +1,26 @@
 """
 capital_guard.py
 ================================================
-Guardián de capital progresivo — Estrategia WDC Híbrida
-Weekly Double Compounding:
-- Duplicar el capital semanalmente (50 -> 100 -> 200).
-- Lote sugerido dinámico por fase.
+Guardian de capital progresivo — Estrategia WDC Hibrida
+Weekly Double Compounding: $50 -> $100 -> $200 ...
 
-Versión WDC CAMINO A — Francotirador Calibre Pesado:
-  Fase CRECIMIENTO  : 25% de riesgo por operación
-                      Con RR 1:2 → 2 TP consecutivos = +50% capital → meta semanal
-  Fase CONSOLIDACIÓN: 10% de riesgo (ganó >50% del objetivo diario)
-  Fase ESCUDO       : 2%  de riesgo (meta diaria alcanzada o cierre viernes)
-  Horario operativo : 2:00 AM – 11:00 AM hora Colombia (UTC-5)
+Version WDC SWEET SPOT — Confirmado por Monte Carlo:
+  Backtest:  WR=48.6%, PF=1.73, DD=12%, 72 trades en 2 anios
+  MC 5%:     90.1% duplican | 2.0% ruina | Mediana $210 | P95 $587
+
+  Fase CRECIMIENTO  : 5% de riesgo por operacion  <- SWEET SPOT MC
+  Fase CONSOLIDACION: 3% de riesgo (gano >50% del objetivo diario)
+  Fase ESCUDO       : 1% de riesgo (meta diaria alcanzada o viernes)
+
+  Horario operativo : 2:00 AM - 11:00 AM hora Colombia (UTC-5)
   SL: 8.0 pips | TP: 16.0 pips | RR 1:2
 
-  ⚠️  MATH CHECK 25%:
-    - 1 TP al 25% con RR 1:2 → +50% del riesgo = +12.5% capital
-    - 2 TP consecutivos       → +25% capital total
-    - Stop diario 2 SL        → -50% máximo (riesgo de ruina real)
-    → Usar SOLO si win rate confirmado >= 45% (backtest: 48.6% ✅)
+  MATH CHECK 5%:
+    - Capital $50 | lote = $50*5% / (8*$10) = 0.03
+    - Ganancia por TP: 0.03 * 8 * $10 * 2 = $4.80 (+9.6%)
+    - Perdida por SL : 0.03 * 8 * $10     = $2.40 (-4.8%)
+    - Para duplicar a $100: necesitas net +$50
+    - Con 48.6% WR y RR 1:2: esperanza = +$0.48/trade * lote_escalado
 ================================================
 """
 
@@ -27,11 +29,9 @@ import math
 import json
 import os
 
-# ── Horario operativo Colombia (UTC-5) ──────────────────────────────────────
-# 02:00 AM Colombia = 07:00 UTC
-# 11:00 AM Colombia = 16:00 UTC
-TRADE_HOUR_START_UTC = 7   # 02:00 AM Colombia
-TRADE_HOUR_END_UTC   = 16  # 11:00 AM Colombia
+# -- Horario operativo Colombia (UTC-5) ------------------------------------
+TRADE_HOUR_START_UTC = 7    # 02:00 AM Colombia
+TRADE_HOUR_END_UTC   = 16   # 11:00 AM Colombia
 
 
 class CapitalGuard:
@@ -39,17 +39,16 @@ class CapitalGuard:
     SL_PIPS = 8.0
     TP_PIPS = 16.0
 
-    # ── Riesgos por fase (WDC Camino A — Calibre Pesado) ─────────────────
-    RIESGO_CRECIMIENTO   = 0.25   # 25% — bala de cañón: 2 TP = meta semanal
-    RIESGO_CONSOLIDACION = 0.10   # 10% — frenado táctico tras >50% meta diaria
-    RIESGO_ESCUDO        = 0.02   #  2% — protección capital acumulado
+    # -- Riesgos por fase (Sweet Spot confirmado por MC) -------------------
+    RIESGO_CRECIMIENTO   = 0.05   # 5%  <- Sweet Spot: 90.1% duplican, 2% ruina
+    RIESGO_CONSOLIDACION = 0.03   # 3%  <- frenado tactico
+    RIESGO_ESCUDO        = 0.01   # 1%  <- proteccion maxima
 
-    # ── Stop-loss diario: máximo 2 SL consecutivos al 25% = -50% capital
-    # Usamos 45% para dar un margen mínimo antes de cortar
-    MAX_DAILY_LOSS_PCT   = 0.45
+    # -- Stop-loss diario: 3 SL al 5% = -15% capital (conservador)
+    MAX_DAILY_LOSS_PCT   = 0.20   # 20% del capital -> corta el dia
 
-    # ── Límite de racha perdedora: 2 SL seguidos en CRECIMIENTO = parar el día
-    MAX_CONSECUTIVE_SL   = 2
+    # -- Racha maxima de SL consecutivos antes de pausar
+    MAX_CONSECUTIVE_SL   = 3     # 3 SL seguidos = pausa por hoy
 
     def __init__(self):
         self._file_path = "capital_state.json"
@@ -59,7 +58,6 @@ class CapitalGuard:
         return datetime.now(timezone.utc)
 
     def _colombia_hour(self) -> int:
-        """Hora actual en Colombia (UTC-5)."""
         return (self._now() - timedelta(hours=5)).hour
 
     def _load_state(self) -> list[dict]:
@@ -70,12 +68,11 @@ class CapitalGuard:
                 data = json.load(f)
             now = self._now()
             threshold = now - timedelta(days=7)
-            ops = []
-            for d in data:
-                ts = datetime.fromisoformat(d["ts"])
-                if ts >= threshold:
-                    ops.append({"pnl": d["pnl"], "ts": ts})
-            return ops
+            return [
+                {"pnl": d["pnl"], "ts": datetime.fromisoformat(d["ts"])}
+                for d in data
+                if datetime.fromisoformat(d["ts"]) >= threshold
+            ]
         except Exception as e:
             print(f"Error cargando estado de capital: {e}")
             return []
@@ -89,10 +86,7 @@ class CapitalGuard:
             print(f"Error guardando estado: {e}")
 
     def record(self, pnl: float):
-        self._operations.append({
-            "pnl": pnl,
-            "ts":  self._now(),
-        })
+        self._operations.append({"pnl": pnl, "ts": self._now()})
         self._save_state()
 
     def pnl_day(self) -> float:
@@ -107,7 +101,7 @@ class CapitalGuard:
         return sum(o["pnl"] for o in self._operations if o["ts"] >= start)
 
     def _consecutive_sl_today(self) -> int:
-        """Cuenta la racha de SL consecutivos desde el último TP del día."""
+        """Racha de SL consecutivos desde el ultimo TP del dia."""
         start = self._now().replace(hour=0, minute=0, second=0, microsecond=0)
         ops_today = [o for o in self._operations if o["ts"] >= start]
         streak = 0
@@ -115,7 +109,7 @@ class CapitalGuard:
             if op["pnl"] < 0:
                 streak += 1
             else:
-                break  # TP interrumpe la racha
+                break
         return streak
 
     def _get_base_and_target(self, capital_activo: float):
@@ -128,61 +122,49 @@ class CapitalGuard:
                 break
         return base, base * 2
 
-    def _is_trading_hours(self) -> bool:
-        """Verifica si estamos dentro del horario Colombia: 2 AM – 11 AM."""
-        hora_co = self._colombia_hour()
-        return 2 <= hora_co < 11
-
     def should_trade(self, capital_activo: float) -> tuple[bool, str]:
-        p_day  = self.pnl_day()
-        now    = self._now()
+        p_day   = self.pnl_day()
+        now     = self._now()
         hora_co = self._colombia_hour()
 
-        # 1) Horario Colombia
+        # 1) Horario Colombia 2–11 AM
         if not (2 <= hora_co < 11):
             return False, f"Fuera de horario Colombia ({hora_co:02d}:xx) — opera solo 2:00–11:00 AM"
 
-        # 2) Cierre de viernes
-        is_friday_late = now.weekday() == 4 and hora_co >= 11
-        if is_friday_late:
+        # 2) Cierre viernes
+        if now.weekday() == 4 and hora_co >= 11:
             return False, "Cierre de viernes — stop after 11:00 AM Colombia"
 
-        # 3) Stop-loss diario (45% capital en zona CRECIMIENTO)
+        # 3) Stop-loss diario 20%
         max_daily_loss = capital_activo * self.MAX_DAILY_LOSS_PCT
         if p_day <= -max_daily_loss:
-            return False, f"Max loss diario alcanzado (${-p_day:.2f} / límite ${max_daily_loss:.2f})"
+            return False, f"Max loss diario alcanzado (${-p_day:.2f} / limite ${max_daily_loss:.2f})"
 
-        # 4) Racha máxima de SL consecutivos (2 SL seguidos = parar el día)
+        # 4) Racha de SL consecutivos
         sl_streak = self._consecutive_sl_today()
         if sl_streak >= self.MAX_CONSECUTIVE_SL:
-            return False, f"Racha de {sl_streak} SL consecutivos — pausa por hoy (Camino A: max {self.MAX_CONSECUTIVE_SL})"
+            return False, f"Racha {sl_streak} SL consecutivos — pausa por hoy (max {self.MAX_CONSECUTIVE_SL})"
 
-        return True, "OK — dentro de horario y límites"
+        return True, "OK — dentro de horario y limites"
 
     def get_phase(self, capital_activo: float) -> tuple[str, float]:
         """
-        Retorna (nombre_fase, porcentaje_riesgo) según PnL del día.
-        Objetivo diario = base / 5 → +20% diario para duplicar en 5 días.
-        Con 25% de riesgo: 2 TP = +25% → meta de 1 día superada con 2 trades.
+        Fases segun PnL del dia vs objetivo diario (+20% = duplicar en 5 dias).
         """
-        base, target    = self._get_base_and_target(capital_activo)
-        daily_target    = base * 0.20   # +20% diario
-        p_day           = self.pnl_day()
-        now             = self._now()
-        is_friday_late  = now.weekday() == 4 and self._colombia_hour() >= 11
+        base, _      = self._get_base_and_target(capital_activo)
+        daily_target = base * 0.20
+        p_day        = self.pnl_day()
+        now          = self._now()
 
-        if is_friday_late:
+        if now.weekday() == 4 and self._colombia_hour() >= 11:
             return "ESCUDO (CIERRE VIERNES)", self.RIESGO_ESCUDO
 
-        # Meta diaria superada → proteger ganancias al máximo
         if p_day >= daily_target:
             return "ESCUDO", self.RIESGO_ESCUDO
 
-        # Mitad de la meta diaria → reducir riesgo, asegurar parciales
-        if p_day >= (daily_target * 0.50):
+        if p_day >= daily_target * 0.50:
             return "CONSOLIDACION", self.RIESGO_CONSOLIDACION
 
-        # Bajo la mitad → bala de cañón
         return "CRECIMIENTO", self.RIESGO_CRECIMIENTO
 
     def status_text(self, capital_activo: float) -> str:
@@ -195,28 +177,31 @@ class CapitalGuard:
         hora_co           = self._colombia_hour()
         sl_streak         = self._consecutive_sl_today()
 
-        # Lote dinámico: lote = (capital * riesgo) / (SL_pips * $10/pip por lote estándar)
+        # Lote dinamico
         lote_calc     = (capital_activo * riesgo) / (self.SL_PIPS * 10)
         lote_sugerido = max(0.01, round(lote_calc, 2))
 
-        # Proyección: cuántos TP necesita para la meta diaria desde PnL actual
-        ganancia_por_tp = capital_activo * riesgo * 2   # RR 1:2
-        restante        = max(0, daily_target - p_day)
-        tps_necesarios  = math.ceil(restante / ganancia_por_tp) if ganancia_por_tp > 0 else "∞"
+        # Ganancia por TP y TPs necesarios para la meta
+        ganancia_tp    = lote_sugerido * self.SL_PIPS * 10 * 2
+        restante       = max(0.0, daily_target - p_day)
+        tps_necesarios = math.ceil(restante / ganancia_tp) if ganancia_tp > 0 else float("inf")
+
+        # Progreso hacia meta semanal
+        progreso_semana = (p_week / (base)) * 100  # % del camino a duplicar
 
         return (
-            f"=== ESTADO WDC — CAMINO A (FRANCOTIRADOR CALIBRE PESADO) ===\n"
+            f"=== ESTADO WDC — SWEET SPOT 5% (MC: 90.1% duplicar | 2% ruina) ===\n"
             f"  Hora Colombia       : {hora_co:02d}:xx (operativo 02–11 AM)\n"
-            f"  Capital Activo      : ${capital_activo:.2f} (Base: ${base} → Objetivo: ${target})\n"
-            f"  PNL Día             : ${p_day:.2f} (Meta +20%: ${daily_target:.2f})\n"
-            f"  PNL Semana          : ${p_week:.2f}\n"
+            f"  Capital Activo      : ${capital_activo:.2f} (Base: ${base} -> Objetivo: ${target})\n"
+            f"  Progreso semana     : {progreso_semana:.1f}% hacia ${target}\n"
+            f"  PNL Dia             : ${p_day:+.2f} (Meta diaria +20%: ${daily_target:.2f})\n"
+            f"  PNL Semana          : ${p_week:+.2f}\n"
             f"  Fase Actual         : {phase}\n"
-            f"  Riesgo por operación: {riesgo*100:.0f}%\n"
+            f"  Riesgo por operacion: {riesgo*100:.0f}%\n"
             f"  Lote Sugerido       : {lote_sugerido}\n"
-            f"  Ganancia por TP     : ${ganancia_por_tp:.2f} (RR 1:2)\n"
-            f"  TPs restantes/meta  : {tps_necesarios}\n"
-            f"  Racha SL hoy        : {sl_streak}/{self.MAX_CONSECUTIVE_SL} (para al llegar al límite)\n"
-            f"  SL={self.SL_PIPS} pips | TP={self.TP_PIPS} pips | RR 1:2\n"
+            f"  Ganancia por TP     : ${ganancia_tp:.2f} (RR 1:2)\n"
+            f"  TPs para meta dia   : {tps_necesarios}\n"
+            f"  Racha SL hoy        : {sl_streak}/{self.MAX_CONSECUTIVE_SL}\n"
+            f"  SL={self.SL_PIPS}p | TP={self.TP_PIPS}p | RR 1:2\n"
             f"  Puede operar        : {'SI' if can_trade else 'NO'} — {reason}\n"
-            f"  Stop-loss diario    : {self.MAX_DAILY_LOSS_PCT*100:.0f}% del capital\n"
         )
