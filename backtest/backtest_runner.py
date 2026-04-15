@@ -2,6 +2,12 @@
 backtest_runner.py
 Ejecuta la simulacion vela por vela sobre datos M15 historicos.
 Aplica logica de fases de capital (capital_guard) del prompt.md.
+
+Cambios v2 (2026-04-15):
+- MAX_TRADES_SIMULTANEOUS reducido a 1 en todas las fases.
+  Evita que el bot abra multiples posiciones en el mismo momento.
+- Nuevo limite MAX_TRADES_PER_DAY=2 para evitar sobretrading diario.
+  Nunca mas de 2 entradas en el mismo dia calendario.
 """
 import numpy as np
 import pandas as pd
@@ -13,7 +19,13 @@ SL_PIPS  = 8.0
 TP_PIPS  = 16.0
 PIP_SIZE = 0.0001       # 1 pip EURUSD
 RISK_PCT = {"CRECIMIENTO": 0.02, "CONSOLIDACION": 0.015, "ESCUDO": 0.01}
-MAX_TRADES_SIMULTANEOUS = {"CRECIMIENTO": 2, "CONSOLIDACION": 1, "ESCUDO": 1}
+
+# v2: maximo 1 trade simultaneo en todas las fases
+MAX_TRADES_SIMULTANEOUS = {"CRECIMIENTO": 1, "CONSOLIDACION": 1, "ESCUDO": 1}
+
+# v2: maximo 2 trades por dia para evitar sobretrading
+MAX_TRADES_PER_DAY = 2
+
 DAILY_STOP_PCT = -0.06  # -6% del capital -> HOLD todo el dia
 
 # Probabilidad simulada de noticia HIGH por vela M15 (aprox 2-3 eventos/semana)
@@ -53,25 +65,36 @@ def run_backtest(
     Itera vela por vela en M15.
     Para cada vela evalua la confluencia y simula el trade.
     Retorna DataFrame con todas las operaciones ejecutadas.
+
+    Limites v2:
+    - 1 trade simultaneo maximo por fase.
+    - 2 trades diarios maximos (MAX_TRADES_PER_DAY).
+    Un trade se considera activo si su exit_time aun no ha llegado.
     """
     rng = np.random.default_rng(seed)
     m15_full = frames["M15"]
     h1_full  = frames["H1"]
     h4_full  = frames["H4"]
 
-    capital           = initial_capital
+    capital            = initial_capital
     capital_week_start = initial_capital
-    trades            = []
+    trades             = []
 
-    pnl_day    = 0.0
-    last_date  = None
-    last_week  = None
+    pnl_day       = 0.0
+    trades_today  = 0          # contador de trades del dia actual
+    last_date     = None
+    last_week     = None
+
+    # Rastrear trades activos: lista de exit_time de posiciones abiertas
+    active_exit_times = []
 
     # Necesitamos al menos `lookback` velas de historia
     start_idx = max(lookback, 60)
 
     print(f"[Backtest] Iniciando simulacion: {len(m15_full) - start_idx} velas M15")
     print(f"[Backtest] Capital inicial: ${initial_capital:.2f}")
+    print(f"[Backtest] Limites v2: max {MAX_TRADES_PER_DAY} trades/dia, "
+          f"max {MAX_TRADES_SIMULTANEOUS['CRECIMIENTO']} simultaneo")
 
     for i in tqdm(range(start_idx, len(m15_full)), desc="Simulando velas"):
         ts    = m15_full.index[i]
@@ -89,8 +112,9 @@ def run_backtest(
         current_week = ts.isocalendar()[:2]  # (year, week)
 
         if last_date != current_date:
-            pnl_day   = 0.0
-            last_date = current_date
+            pnl_day      = 0.0
+            trades_today = 0
+            last_date    = current_date
 
         if last_week != current_week:
             capital_week_start = capital
@@ -103,6 +127,17 @@ def run_backtest(
 
         # Viernes despues de 17:00 UTC -> HOLD
         if ts.weekday() == 4 and ts.hour >= 17:
+            continue
+
+        # ── Limite de trades por dia (v2) ──────────────────────────────
+        if trades_today >= MAX_TRADES_PER_DAY:
+            continue
+
+        # ── Limite de trades simultaneos (v2) ─────────────────────────
+        # Limpiar posiciones que ya cerraron
+        active_exit_times = [t for t in active_exit_times if t > ts]
+        max_simultaneous  = MAX_TRADES_SIMULTANEOUS.get(phase, 1)
+        if len(active_exit_times) >= max_simultaneous:
             continue
 
         # Simular inputs externos
@@ -131,8 +166,8 @@ def run_backtest(
             tp_price = entry_price - TP_PIPS * PIP_SIZE
 
         # Avanzar velas hasta que se toque SL o TP
-        outcome   = None
-        exit_idx  = i
+        outcome    = None
+        exit_idx   = i
         exit_price = entry_price
         max_future = min(i + 200, len(m15_full))  # maximo 50 horas
 
@@ -177,11 +212,16 @@ def run_backtest(
         capital += pnl_usd
         pnl_day += pnl_usd
 
+        # Registrar trade activo y actualizar contador diario
+        exit_timestamp = m15_full.index[exit_idx]
+        active_exit_times.append(exit_timestamp)
+        trades_today += 1
+
         duration_candles = exit_idx - i
 
         trades.append({
             "entry_time":        ts,
-            "exit_time":         m15_full.index[exit_idx],
+            "exit_time":         exit_timestamp,
             "action":            action,
             "entry_price":       round(entry_price, 5),
             "exit_price":        round(exit_price, 5),

@@ -3,6 +3,12 @@ signal_engine.py
 Replica determinista del arbol de 4 niveles del prompt.md.
 Todos los valores de sentimiento y Alpha Vantage se generan
 con distribuciones estadisticas plausibles (no hay historico real).
+
+Cambios v2 (2026-04-15):
+- FIX: sentimiento EXTREMO ya NO omite el Nivel 3 (tendencia multi-TF).
+  Si el sentimiento dice BUY pero H1 va hacia abajo, el bot hace HOLD.
+- FIX: eliminados Rebote_SMA50 y Rechazo_SMA50 del Nivel 4.
+  Solo se aceptan PinBar y Envolvente como patrones validos de entrada.
 """
 import numpy as np
 import pandas as pd
@@ -109,6 +115,9 @@ def _is_engulfing_bearish(prev_o, prev_c, curr_o, curr_c) -> bool:
 def detect_pattern(m15: pd.DataFrame, bias: str) -> str | None:
     """
     Detecta patrones de entrada validos para el bias dado.
+    SOLO acepta PinBar y Envolvente confirmados.
+    Rebote_SMA50 y Rechazo_SMA50 fueron eliminados por ser demasiado
+    ruidosos con un SL de 8 pips (spread + manipulacion).
     Retorna nombre del patron o None.
     """
     if len(m15) < 3:
@@ -119,25 +128,19 @@ def detect_pattern(m15: pd.DataFrame, bias: str) -> str | None:
     o, h, l, c = last["Open"], last["High"], last["Low"], last["Close"]
     po, pc    = prev["Open"], prev["Close"]
 
-    sma50 = _sma(m15["Close"], 50)
-
     if bias == "BUY":
-        near_sma_support = not pd.isna(sma50) and abs(c - sma50) / sma50 < 0.0015
         if _is_pin_bar_bullish(o, h, l, c):
             return "PinBar_Alcista"
         if _is_engulfing_bullish(po, pc, o, c):
             return "Envolvente_Alcista"
-        if near_sma_support and c > po:
-            return "Rebote_SMA50"
+        # Rebote_SMA50 ELIMINADO — demasiado ruidoso con SL=8p
 
     elif bias == "SELL":
-        near_sma_resistance = not pd.isna(sma50) and abs(c - sma50) / sma50 < 0.0015
         if _is_pin_bar_bearish(o, h, l, c):
             return "PinBar_Bajista"
         if _is_engulfing_bearish(po, pc, o, c):
             return "Envolvente_Bajista"
-        if near_sma_resistance and c < po:
-            return "Rechazo_SMA50"
+        # Rechazo_SMA50 ELIMINADO — demasiado ruidoso con SL=8p
 
     return None
 
@@ -183,6 +186,10 @@ def evaluate_confluence(
     Evalua los 4 niveles del prompt.md en orden estricto.
     Retorna (accion, razon_texto, confluence_levels_dict).
     accion puede ser: 'BUY', 'SELL', 'HOLD'
+
+    REGLA CRITICA v2: el Nivel 3 (tendencia) NUNCA se omite.
+    Aunque el sentimiento sea EXTREMO (>=75%), si H1 contradice
+    el sesgo, el resultado es HOLD. Esto elimina el 'salto de filtros'.
     """
     levels = {
         "nivel_1_noticias": "",
@@ -204,64 +211,63 @@ def evaluate_confluence(
     # ── NIVEL 2: Sentimiento Myfxbook ──────────────────────────────────
     short_pct = sentiment["short_pct"]
     long_pct  = sentiment["long_pct"]
-    skip_n3   = False
     bias      = None
 
     if short_pct >= 75:
-        bias   = "BUY"
-        skip_n3 = True
-        levels["nivel_2_sentimiento"] = f"EXTREMO — {short_pct:.0f}% short → sesgo BUY"
-        levels["nivel_3_tendencia"]   = "OMITIDO — sentimiento extremo"
+        bias = "BUY"
+        levels["nivel_2_sentimiento"] = f"EXTREMO — {short_pct:.0f}% short → sesgo BUY (confirmar N3)"
     elif long_pct >= 75:
-        bias   = "SELL"
-        skip_n3 = True
-        levels["nivel_2_sentimiento"] = f"EXTREMO — {long_pct:.0f}% long → sesgo SELL"
-        levels["nivel_3_tendencia"]   = "OMITIDO — sentimiento extremo"
+        bias = "SELL"
+        levels["nivel_2_sentimiento"] = f"EXTREMO — {long_pct:.0f}% long → sesgo SELL (confirmar N3)"
     elif short_pct >= 65:
-        bias   = "BUY"
+        bias = "BUY"
         levels["nivel_2_sentimiento"] = f"FUERTE — {short_pct:.0f}% short → sesgo BUY (confirmar N3)"
     elif long_pct >= 65:
-        bias   = "SELL"
+        bias = "SELL"
         levels["nivel_2_sentimiento"] = f"FUERTE — {long_pct:.0f}% long → sesgo SELL (confirmar N3)"
     else:
         levels["nivel_2_sentimiento"] = f"NEUTRAL — {short_pct:.0f}% short / {long_pct:.0f}% long"
 
     # ── NIVEL 3: Tendencia multi-timeframe + Alpha Vantage ─────────────
-    if not skip_n3:
-        h1_trend  = get_trend(h1)
-        m15_trend = get_trend(m15)
+    # SIEMPRE se evalua, incluso con sentimiento EXTREMO.
+    # Si H1 contradice el sesgo -> HOLD sin excepcion.
+    h1_trend  = get_trend(h1)
+    m15_trend = get_trend(m15)
 
-        if bias is None:
-            # Sentimiento neutral: bias lo define la tendencia
-            if h1_trend == "BUY" and m15_trend == "BUY":
-                bias = "BUY"
-            elif h1_trend == "SELL" and m15_trend == "SELL":
-                bias = "SELL"
-            else:
-                levels["nivel_3_tendencia"] = f"FALLO — H1={h1_trend} M15={m15_trend} en conflicto"
-                levels["nivel_4_patron"]    = "NO EVALUADO"
-                return "HOLD", f"N3 FALLO: H1={h1_trend} M15={m15_trend} en conflicto", levels
+    if bias is None:
+        # Sentimiento neutral: bias lo define la tendencia
+        if h1_trend == "BUY" and m15_trend == "BUY":
+            bias = "BUY"
+        elif h1_trend == "SELL" and m15_trend == "SELL":
+            bias = "SELL"
         else:
-            # Sentimiento fuerte: verificar que tendencia no contradiga
-            if h1_trend != bias and h1_trend != "NEUTRAL":
-                levels["nivel_3_tendencia"] = f"FALLO — H1={h1_trend} contradice sesgo {bias}"
-                levels["nivel_4_patron"]    = "NO EVALUADO"
-                return "HOLD", f"N3 FALLO: H1={h1_trend} contradice sesgo sentimiento {bias}", levels
-
-        # Alpha Vantage divergencia
-        if bias == "BUY" and av_score <= -0.15:
-            levels["nivel_3_tendencia"] = f"FALLO — divergencia AV bearish ({av_score:.2f}) vs sesgo BUY"
+            levels["nivel_3_tendencia"] = f"FALLO — H1={h1_trend} M15={m15_trend} en conflicto"
             levels["nivel_4_patron"]    = "NO EVALUADO"
-            return "HOLD", f"N3 FALLO: AV Score {av_score:.2f} bearish vs BUY", levels
-        if bias == "SELL" and av_score >= 0.15:
-            levels["nivel_3_tendencia"] = f"FALLO — divergencia AV bullish ({av_score:.2f}) vs sesgo SELL"
-            levels["nivel_4_patron"]    = "NO EVALUADO"
-            return "HOLD", f"N3 FALLO: AV Score {av_score:.2f} bullish vs SELL", levels
+            return "HOLD", f"N3 FALLO: H1={h1_trend} M15={m15_trend} en conflicto", levels
+    else:
+        # Sentimiento fuerte o extremo: verificar que H1 no contradiga
+        if h1_trend != bias and h1_trend != "NEUTRAL":
+            levels["nivel_3_tendencia"] = (
+                f"FALLO — H1={h1_trend} contradice sesgo {bias} "
+                f"(sentimiento={'EXTREMO' if short_pct >= 75 or long_pct >= 75 else 'FUERTE'})"
+            )
+            levels["nivel_4_patron"] = "NO EVALUADO"
+            return "HOLD", f"N3 FALLO: H1={h1_trend} contradice sesgo {bias}", levels
 
-        av_label = "Bullish" if av_score > 0.05 else ("Bearish" if av_score < -0.05 else "Neutral")
-        levels["nivel_3_tendencia"] = (
-            f"OK — H1={h1_trend} M15={m15_trend} alineados + AV {av_label} ({av_score:.2f})"
-        )
+    # Alpha Vantage divergencia
+    if bias == "BUY" and av_score <= -0.15:
+        levels["nivel_3_tendencia"] = f"FALLO — divergencia AV bearish ({av_score:.2f}) vs sesgo BUY"
+        levels["nivel_4_patron"]    = "NO EVALUADO"
+        return "HOLD", f"N3 FALLO: AV Score {av_score:.2f} bearish vs BUY", levels
+    if bias == "SELL" and av_score >= 0.15:
+        levels["nivel_3_tendencia"] = f"FALLO — divergencia AV bullish ({av_score:.2f}) vs sesgo SELL"
+        levels["nivel_4_patron"]    = "NO EVALUADO"
+        return "HOLD", f"N3 FALLO: AV Score {av_score:.2f} bullish vs SELL", levels
+
+    av_label = "Bullish" if av_score > 0.05 else ("Bearish" if av_score < -0.05 else "Neutral")
+    levels["nivel_3_tendencia"] = (
+        f"OK — H1={h1_trend} M15={m15_trend} alineados + AV {av_label} ({av_score:.2f})"
+    )
 
     # ── NIVEL 4: Patron de entrada ─────────────────────────────────────
     if bias is None:
@@ -270,7 +276,7 @@ def evaluate_confluence(
 
     pattern = detect_pattern(m15, bias)
     if not pattern:
-        levels["nivel_4_patron"] = f"FALLO — sin patron valido para {bias}"
+        levels["nivel_4_patron"] = f"FALLO — sin patron valido para {bias} (solo PinBar/Envolvente)"
         return "HOLD", f"N4 FALLO: sin patron de entrada {bias}", levels
 
     levels["nivel_4_patron"] = f"OK — {pattern}"
