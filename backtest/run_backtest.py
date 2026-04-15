@@ -4,6 +4,9 @@ run_backtest.py — Script de entrada del modulo backtest.
 Uso:
   python -m backtest.run_backtest
   python -m backtest.run_backtest --years 2 --sims 1000 --capital 50
+  python -m backtest.run_backtest --risk-mode 0.25   # Camino A: 25% riesgo
+  python -m backtest.run_backtest --risk-mode 0.10   # modo agresivo anterior
+  python -m backtest.run_backtest --risk-mode hist    # PnL historico sin reescalar
 """
 import argparse
 import logging
@@ -18,16 +21,48 @@ logging.basicConfig(
 logger = logging.getLogger("run_backtest")
 
 
+def _parse_risk_mode(value: str) -> float | None:
+    """Convierte el argumento --risk-mode a float o None."""
+    if value.lower() in ("hist", "historico", "none"):
+        return None
+    try:
+        v = float(value)
+        if not (0 < v < 1):
+            raise argparse.ArgumentTypeError(
+                f"--risk-mode debe ser un decimal entre 0 y 1 (ej: 0.25) o 'hist'"
+            )
+        return v
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"Valor invalido para --risk-mode: '{value}'. Usa 0.25, 0.10, o 'hist'."
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Backtest + Monte Carlo — WDC Confluence Strategy EURUSD"
     )
-    parser.add_argument("--years",   type=int,   default=2,    help="Anios de datos historicos (default: 2)")
-    parser.add_argument("--sims",    type=int,   default=1000, help="Numero de simulaciones Monte Carlo (default: 1000)")
-    parser.add_argument("--capital", type=float, default=50.0, help="Capital inicial USD (default: 50)")
-    parser.add_argument("--seed",    type=int,   default=42,   help="Semilla aleatoria para reproducibilidad")
-    parser.add_argument("--no-cache",action="store_true",      help="Forzar re-descarga de datos (ignorar cache)")
+    parser.add_argument("--years",     type=int,              default=2,      help="Anios de datos historicos (default: 2)")
+    parser.add_argument("--sims",      type=int,              default=1000,   help="Simulaciones Monte Carlo (default: 1000)")
+    parser.add_argument("--capital",   type=float,            default=50.0,   help="Capital inicial USD (default: 50)")
+    parser.add_argument("--seed",      type=int,              default=42,     help="Semilla aleatoria (default: 42)")
+    parser.add_argument("--no-cache",  action="store_true",                   help="Forzar re-descarga de datos")
+    parser.add_argument(
+        "--risk-mode",
+        type=str,
+        default="hist",
+        metavar="RISK",
+        help=(
+            "Modo de riesgo para Monte Carlo. "
+            "Opciones: 'hist' (PnL historico sin reescalar, default), "
+            "'0.25' (Camino A — 25%% riesgo por trade), "
+            "'0.10' (modo agresivo — 10%% riesgo). "
+            "Ejemplo: --risk-mode 0.25"
+        ),
+    )
     args = parser.parse_args()
+
+    risk_pct = _parse_risk_mode(args.risk_mode)
 
     logger.info("=" * 60)
     logger.info("  WDC Confluence Strategy — Backtest + Monte Carlo")
@@ -36,12 +71,12 @@ def main():
     logger.info(f"  Periodo         : {args.years} anio(s)")
     logger.info(f"  Simulaciones MC : {args.sims}")
     logger.info(f"  Semilla         : {args.seed}")
+    logger.info(f"  Modo riesgo MC  : {f'{risk_pct*100:.0f}% (Camino A)' if risk_pct else 'historico (lote 0.01)'}")
     logger.info("=" * 60)
 
     # ── 1. Cargar / descargar datos ────────────────────────────────────
     from .data_loader import download_data
     import pickle
-    from pathlib import Path
 
     cache_path = Path(__file__).parent / "output" / "data_cache.pkl"
     cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -59,7 +94,7 @@ def main():
         logger.info("Datos guardados en cache")
 
     if frames["M15"].empty:
-        logger.error("No se pudieron descargar datos M15. Verifica tu conexion a internet.")
+        logger.error("No se pudieron descargar datos M15. Verifica tu conexion.")
         sys.exit(1)
 
     # ── 2. Ejecutar Backtest ───────────────────────────────────────────
@@ -68,25 +103,30 @@ def main():
     trades_df = run_backtest(frames, initial_capital=args.capital, seed=args.seed)
 
     if trades_df.empty:
-        logger.warning("El backtest no genero ningun trade. Revisa los datos o la logica del signal_engine.")
+        logger.warning("El backtest no genero ningun trade. Revisa los datos o signal_engine.")
         sys.exit(1)
 
     logger.info(f"Backtest completado: {len(trades_df)} trades simulados")
 
     # ── 3. Monte Carlo ─────────────────────────────────────────────────
-    logger.info(f"Ejecutando Monte Carlo ({args.sims} simulaciones)...")
+    logger.info(f"Ejecutando Monte Carlo ({args.sims} simulaciones) | modo: {'Camino A '+str(int(risk_pct*100))+'%' if risk_pct else 'historico'}...")
     from .monte_carlo import run_monte_carlo
     mc_results = run_monte_carlo(
         trades_df,
         initial_capital=args.capital,
         n_simulations=args.sims,
         seed=args.seed,
+        risk_pct=risk_pct,
     )
 
     # ── 4. Reporte HTML ────────────────────────────────────────────────
     logger.info("Generando reporte HTML...")
     from .report import generate_report
-    html_path = generate_report(trades_df, mc_results, initial_capital=args.capital)
+    html_path = generate_report(
+        trades_df,
+        mc_results,
+        initial_capital=args.capital,
+    )
 
     logger.info("=" * 60)
     logger.info(f"  ✅ Reporte listo: {html_path}")
