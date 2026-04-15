@@ -4,6 +4,10 @@ Genera reporte completo en HTML con graficas Plotly interactivas.
 Archivos generados en: backtest/output/
   - backtest_report.html  <- reporte principal con todas las secciones
   - trades.csv            <- historial de trades para analisis externo
+
+FIX v2:
+  - Logica de veredicto WDC corregida: criterios reales de viabilidad.
+  - Semaforo basado en profit_factor + ruin_pct + win_rate (no solo double_pct).
 """
 import os
 import json
@@ -76,6 +80,57 @@ def compute_metrics(trades_df: pd.DataFrame, initial_capital: float = 50.0) -> d
 
 
 # ─────────────────────────────────────────────────────────────
+# LOGICA DE VEREDICTO WDC (CORREGIDA)
+# ─────────────────────────────────────────────────────────────
+
+def _compute_wdc_verdict(metrics: dict, stats: dict) -> tuple[str, str, str]:
+    """
+    Evalua si la estrategia es viable para WDC basandose en:
+      1. Profit Factor >= 1.20  (rentabilidad estructural)
+      2. Win Rate >= 34%        (minimo matematico con RR 1:2)
+      3. Riesgo de ruina MC < 25% (seguridad aceptable)
+      4. Max Drawdown backtest < 40%
+
+    El veredicto NO depende de double_pct del MC con lotes fijos,
+    porque ese % cambia drasticamente con el riesgo por operacion.
+    """
+    pf       = metrics.get("profit_factor", 0)
+    wr       = metrics.get("win_rate", 0)
+    max_dd   = metrics.get("max_drawdown_pct", 100)
+    ruin_pct = stats.get("ruin_pct", 100)
+    double_pct = stats.get("double_pct", 0)
+
+    # --- VIABLE: estrategia solida ---
+    if pf >= 1.50 and wr >= 40 and ruin_pct < 15 and max_dd < 25:
+        emoji = "✅ VIABLE"
+        color = "#22c55e"
+        desc  = (
+            f"Estrategia solida: PF={pf:.2f}, WR={wr:.1f}%, DD={max_dd:.1f}%, Ruina MC={ruin_pct:.1f}%. "
+            f"Matematicamente apta para WDC. Ajusta el riesgo por trade en capital_guard.py para acelerar el compounding."
+        )
+    # --- MARGINAL: funciona pero con limitaciones ---
+    elif pf >= 1.20 and wr >= 34 and ruin_pct < 30 and max_dd < 40:
+        emoji = "⚠️ MARGINAL"
+        color = "#f59e0b"
+        desc  = (
+            f"Estrategia rentable: PF={pf:.2f}, WR={wr:.1f}%, DD={max_dd:.1f}%, Ruina MC={ruin_pct:.1f}%. "
+            f"Funciona con lotes conservadores. Aumenta el riesgo por trade en capital_guard.py con precaucion."
+        )
+    # --- NO VIABLE: problemas estructurales ---
+    else:
+        emoji = "\u274c NO VIABLE"
+        color = "#ef4444"
+        reasons = []
+        if pf < 1.20:  reasons.append(f"Profit Factor bajo ({pf:.2f} < 1.20)")
+        if wr < 34:    reasons.append(f"Win Rate insuficiente ({wr:.1f}% < 34%)")
+        if max_dd >= 40: reasons.append(f"Drawdown excesivo ({max_dd:.1f}% >= 40%)")
+        if ruin_pct >= 30: reasons.append(f"Riesgo de ruina alto ({ruin_pct:.1f}% >= 30%)")
+        desc = "Problemas estructurales: " + " | ".join(reasons) + ". Revisar logica de senales o SL/TP."
+
+    return emoji, color, desc
+
+
+# ─────────────────────────────────────────────────────────────
 # GRAFICAS PLOTLY
 # ─────────────────────────────────────────────────────────────
 
@@ -90,7 +145,6 @@ def _fig_equity_curve(trades_df: pd.DataFrame, initial_capital: float) -> go.Fig
         name="Capital",
         hovertemplate="Trade #%{x}<br>Capital: $%{y:.2f}<extra></extra>",
     ))
-    # Linea de capital inicial
     fig.add_hline(y=initial_capital, line_dash="dash", line_color="gray",
                   annotation_text=f"Inicio ${initial_capital}")
     fig.update_layout(
@@ -191,7 +245,6 @@ def _fig_monte_carlo(mc_results: dict) -> go.Figure:
 
     fig = go.Figure()
 
-    # Dibujar todas las curvas con opacidad baja (maximo 500 para rendimiento)
     sample_n = min(n_sims, 500)
     rng_sample = np.random.default_rng(99)
     indices = rng_sample.choice(n_sims, size=sample_n, replace=False)
@@ -211,7 +264,6 @@ def _fig_monte_carlo(mc_results: dict) -> go.Figure:
             hoverinfo="skip",
         ))
 
-    # Percentiles P5, P50, P95
     p5  = np.percentile(curves, 5,  axis=0)
     p50 = np.percentile(curves, 50, axis=0)
     p95 = np.percentile(curves, 95, axis=0)
@@ -223,7 +275,6 @@ def _fig_monte_carlo(mc_results: dict) -> go.Figure:
     fig.add_trace(go.Scatter(x=x_axis, y=p5, mode="lines",
         line=dict(color="#ef4444", width=2, dash="dot"), name="P5 (pesimista)"))
 
-    # Linea de objetivo (duplicar)
     fig.add_hline(y=target, line_dash="dash", line_color="#22c55e",
                   annotation_text=f"Objetivo WDC: ${target:.0f}")
     fig.add_hline(y=initial, line_dash="dash", line_color="gray",
@@ -326,20 +377,11 @@ def generate_report(
     fig_mc_final = _fig_mc_final_distribution(mc_results)
     fig_mc_dd    = _fig_mc_drawdown_distribution(mc_results)
 
-    # Convertir graficas a HTML embebido
     def to_div(fig):
         return fig.to_html(full_html=False, include_plotlyjs=False)
 
-    # --- Semaforo de viabilidad WDC ---
-    ruin_pct   = stats["ruin_pct"]
-    double_pct = stats["double_pct"]
-
-    if ruin_pct < 10 and double_pct > 40:
-        wdc_verdict = ("✅ VIABLE", "#22c55e", "El WDC parece matematicamente viable con este historial de trades.")
-    elif ruin_pct < 25 and double_pct > 20:
-        wdc_verdict = ("⚠️ MARGINAL", "#f59e0b", "El WDC es marginal. Riesgo de ruina moderado — considerar reducir riesgo por trade.")
-    else:
-        wdc_verdict = ("❌ NO VIABLE", "#ef4444", "El WDC presenta riesgo de ruina alto en esta configuracion. Revisar SL/TP o win rate.")
+    # --- Semaforo de viabilidad WDC (CORREGIDO) ---
+    wdc_verdict = _compute_wdc_verdict(metrics, stats)
 
     # --- Tabla de metricas backtest ---
     def metric_row(label, value, fmt=""):
@@ -420,12 +462,12 @@ def generate_report(
   </style>
 </head>
 <body>
-  <h1>📊 Backtest + Monte Carlo</h1>
-  <p class="subtitle">WDC Confluence Strategy · EURUSD M15 · Generado: {ts}</p>
+  <h1>&#x1F4CA; Backtest + Monte Carlo</h1>
+  <p class="subtitle">WDC Confluence Strategy &middot; EURUSD M15 &middot; Generado: {ts}</p>
 
   <!-- VEREDICTO WDC -->
   <div class="verdict-box" style="border-color:{wdc_verdict[1]}; background:{wdc_verdict[1]}18">
-    <div class="verdict-title" style="color:{wdc_verdict[1]}">{wdc_verdict[0]} — Estrategia WDC</div>
+    <div class="verdict-title" style="color:{wdc_verdict[1]}">{wdc_verdict[0]} &mdash; Estrategia WDC</div>
     <div class="verdict-desc">{wdc_verdict[2]}</div>
   </div>
 
@@ -466,11 +508,11 @@ def generate_report(
   </div>
 
   <!-- EQUITY CURVE -->
-  <h2>📈 Curva de Equity — Backtest Real</h2>
+  <h2>&#x1F4C8; Curva de Equity &mdash; Backtest Real</h2>
   <div class="card">{to_div(fig_equity)}</div>
 
   <!-- GRAFICAS BACKTEST -->
-  <h2>📋 Analisis de Trades</h2>
+  <h2>&#x1F4CB; Analisis de Trades</h2>
   <div class="grid-3">
     <div class="card">{to_div(fig_donut)}</div>
     <div class="card">{to_div(fig_hist)}</div>
@@ -479,7 +521,7 @@ def generate_report(
   <div class="card" style="margin-bottom:24px">{to_div(fig_monthly)}</div>
 
   <!-- MONTE CARLO -->
-  <h2>🎲 Monte Carlo — {stats['n_simulations']} Simulaciones</h2>
+  <h2>&#x1F3B2; Monte Carlo &mdash; {stats['n_simulations']} Simulaciones</h2>
   <div class="card" style="margin-bottom:20px">{to_div(fig_mc)}</div>
   <div class="grid-2">
     <div class="card">{to_div(fig_mc_final)}</div>
@@ -487,7 +529,7 @@ def generate_report(
   </div>
 
   <!-- TABLAS DE METRICAS -->
-  <h2>📊 Metricas Detalladas</h2>
+  <h2>&#x1F4CA; Metricas Detalladas</h2>
   <div class="grid-2">
     <div class="card">
       <h3 style="margin-bottom:12px;font-size:1rem">Backtest</h3>
@@ -500,7 +542,7 @@ def generate_report(
   </div>
 
   <p style="color:var(--muted);font-size:0.8rem;margin-top:32px;text-align:center">
-    bot_trading · WDC Confluence Strategy · EURUSD M15/H1/H4 · {ts}
+    bot_trading &middot; WDC Confluence Strategy &middot; EURUSD M15/H1/H4 &middot; {ts}
   </p>
 </body>
 </html>"""

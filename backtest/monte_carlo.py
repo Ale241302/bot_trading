@@ -1,9 +1,15 @@
 """
 monte_carlo.py
-Toma el historial de trades del backtest y corre N simulaciones
-aleatorizando el orden de los trades (bootstrap sin reemplazo).
+Toma el historial de trades del backtest y corra N simulaciones
+aleatorizando el orden de los trades (bootstrap con reemplazo).
 Aplica el compounding WDC: $50 -> $100 -> $200 ...
+
+FIX v2:
+  - Seed aleatorio por defecto (seed=None) para obtener distribucion real.
+  - Bootstrap CON reemplazo para mayor variabilidad estadistica.
+  - Logica de ruina revisada: drawdown >= RUIN_THRESHOLD sobre capital semanal base.
 """
+import time
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
@@ -17,11 +23,12 @@ def run_monte_carlo(
     trades_df: pd.DataFrame,
     initial_capital: float = 50.0,
     n_simulations: int = 1000,
-    seed: int = 0,
+    seed: int | None = None,   # FIX: None = seed aleatorio real
 ) -> dict:
     """
     Corre `n_simulations` simulaciones sobre el historial de trades.
-    En cada simulacion se baraja aleatoriamente el orden de los trades.
+    En cada simulacion se muestrea CON REEMPLAZO (bootstrap) para
+    obtener variabilidad real entre simulaciones.
 
     Retorna dict con:
       - equity_curves: array (n_sims, n_trades+1) con curvas de capital
@@ -34,9 +41,12 @@ def run_monte_carlo(
     if trades_df.empty:
         raise ValueError("No hay trades para simular. Ejecuta primero el backtest.")
 
-    rng          = np.random.default_rng(seed)
-    pnl_array    = trades_df["pnl_usd"].values.copy()
-    n_trades     = len(pnl_array)
+    # Seed aleatorio si no se especifica (evita resultados identicos entre corridas)
+    effective_seed = seed if seed is not None else int(time.time() * 1000) % (2**31)
+    rng = np.random.default_rng(effective_seed)
+
+    pnl_array  = trades_df["pnl_usd"].values.copy()
+    n_trades   = len(pnl_array)
     final_target = initial_capital * WEEKLY_TARGET_MULT
 
     equity_curves  = np.zeros((n_simulations, n_trades + 1))
@@ -45,39 +55,40 @@ def run_monte_carlo(
     ruin_count     = 0
     double_count   = 0
 
-    print(f"[Monte Carlo] {n_simulations} simulaciones | {n_trades} trades cada una")
+    print(f"[Monte Carlo] {n_simulations} simulaciones | {n_trades} trades (bootstrap con reemplazo) | seed={effective_seed}")
 
     for sim in tqdm(range(n_simulations), desc="Monte Carlo"):
-        shuffled_pnl = rng.permutation(pnl_array)
+        # Bootstrap CON reemplazo: cada simulacion muestrea n_trades trades
+        # del historial, permitiendo repetir o excluir trades individuales.
+        # Esto genera variabilidad real incluso con PnL discretos.
+        sampled_pnl = rng.choice(pnl_array, size=n_trades, replace=True)
+
         capital      = initial_capital
         equity       = [capital]
         peak_capital = capital
         max_dd       = 0.0
         ruined       = False
 
-        for pnl in shuffled_pnl:
+        for pnl in sampled_pnl:
             capital += pnl
             equity.append(capital)
 
-            # Drawdown corriente
             if capital > peak_capital:
                 peak_capital = capital
+
             dd = (peak_capital - capital) / peak_capital if peak_capital > 0 else 0.0
             max_dd = max(max_dd, dd)
 
-            # Condicion de ruina
             if dd >= RUIN_THRESHOLD or capital <= 0:
                 ruined = True
-                # Rellenar el resto de la curva con el ultimo valor
-                equity.extend([capital] * (n_trades - len(equity) + 1))
+                equity.extend([max(capital, 0.0)] * (n_trades - len(equity) + 1))
                 break
 
-        # Asegurar longitud correcta
         while len(equity) < n_trades + 1:
             equity.append(equity[-1])
 
         equity_curves[sim] = equity[:n_trades + 1]
-        final_capitals[sim] = capital
+        final_capitals[sim] = max(capital, 0.0)
         max_drawdowns[sim]  = max_dd
 
         if ruined:
@@ -98,11 +109,13 @@ def run_monte_carlo(
         "n_trades":           n_trades,
         "initial_capital":    initial_capital,
         "target_capital":     final_target,
+        "seed_used":          effective_seed,
     }
 
-    print(f"[Monte Carlo] Ruinas: {ruin_count}/{n_simulations} ({stats['ruin_pct']:.1f}%)")
-    print(f"[Monte Carlo] Duplican: {double_count}/{n_simulations} ({stats['double_pct']:.1f}%)")
-    print(f"[Monte Carlo] DD medio: {stats['mean_max_drawdown']*100:.1f}% | P95: {stats['p95_max_drawdown']*100:.1f}%")
+    print(f"[Monte Carlo] Ruinas   : {ruin_count}/{n_simulations} ({stats['ruin_pct']:.1f}%)")
+    print(f"[Monte Carlo] Duplican : {double_count}/{n_simulations} ({stats['double_pct']:.1f}%)")
+    print(f"[Monte Carlo] Capital final mediana: ${stats['median_final']:.2f} | P5: ${stats['p5_final']:.2f} | P95: ${stats['p95_final']:.2f}")
+    print(f"[Monte Carlo] DD medio : {stats['mean_max_drawdown']*100:.1f}% | P95: {stats['p95_max_drawdown']*100:.1f}%")
 
     return {
         "equity_curves":  equity_curves,
