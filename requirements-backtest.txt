@@ -1,0 +1,11 @@
+# Dependencias exclusivas del módulo backtest
+# Instalar con: pip install -r requirements-backtest.txt
+yfinance>=0.2.40
+pandas>=2.0.0
+numpy>=1.26.0
+pandas-ta>=0.3.14b
+matplotlib>=3.8.0
+scipy>=1.12.0
+tqdm>=4.66.0
+plotly>=5.20.0
+kaleido>=0.2.1
