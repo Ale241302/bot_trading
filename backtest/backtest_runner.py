@@ -8,6 +8,12 @@ Cambios v2 (2026-04-15):
   Evita que el bot abra multiples posiciones en el mismo momento.
 - Nuevo limite MAX_TRADES_PER_DAY=2 para evitar sobretrading diario.
   Nunca mas de 2 entradas en el mismo dia calendario.
+
+Cambios v3 (2026-04-16):
+- TP_PIPS reducido de 16.0 a 12.0 (RR 1:2 -> 1:1.5).
+  Objetivo: aumentar Win Rate por encima del 50%.
+  El precio alcanza el TP de 12 pips con mucha mas frecuencia.
+  WR breakeven con RR 1:1.5 = 40% (antes 33% con RR 1:2).
 """
 import numpy as np
 import pandas as pd
@@ -16,7 +22,7 @@ from .signal_engine import evaluate_confluence, simulate_sentiment, simulate_av_
 
 # ── Constantes estrategia ────────────────────────────────────────────
 SL_PIPS  = 8.0
-TP_PIPS  = 16.0
+TP_PIPS  = 12.0      # v3: reducido de 16 -> 12 para aumentar Win Rate (RR 1:1.5)
 PIP_SIZE = 0.0001       # 1 pip EURUSD
 RISK_PCT = {"CRECIMIENTO": 0.02, "CONSOLIDACION": 0.015, "ESCUDO": 0.01}
 

@@ -27,12 +27,14 @@ def download_data(years: int = 2) -> dict[str, pd.DataFrame]:
       - 4h:  maximo 730 dias (2 anios)
     Retorna dict con keys 'M15', 'H1', 'H4'.
     """
+    # Yahoo intraday data (M15, H1, H4) is strictly limited to the last 60-730 days.
+    # To ensure synchronization and availability, we limit all to the last 59 days.
     end   = datetime.utcnow()
-    start = end - timedelta(days=365 * years)
+    start = end - timedelta(days=59)
 
     frames = {}
 
-    # ---- H1 y H4 (sin limite de chunk) ----
+    # ---- H1 y H4 ----
     for tf, interval in [("H1", "1h"), ("H4", "4h")]:
         logger.info(f"Descargando {tf} ({interval}) desde {start.date()} hasta {end.date()}")
         df = yf.download(
@@ -43,32 +45,23 @@ def download_data(years: int = 2) -> dict[str, pd.DataFrame]:
             auto_adjust=True,
             progress=False,
         )
-        df = _clean(df)
+        if not df.empty:
+            df = _clean(df)
         frames[tf] = df
         logger.info(f"  {tf}: {len(df)} velas descargadas")
 
-    # ---- M15 (maximo 60 dias por request -> chunks) ----
-    logger.info("Descargando M15 en chunks de 55 dias...")
-    chunk_days = 55
-    chunks = []
-    chunk_end = end
-    while chunk_end > start:
-        chunk_start = max(chunk_end - timedelta(days=chunk_days), start)
-        df_chunk = yf.download(
-            SYMBOL,
-            start=chunk_start.strftime("%Y-%m-%d"),
-            end=chunk_end.strftime("%Y-%m-%d"),
-            interval="15m",
-            auto_adjust=True,
-            progress=False,
-        )
-        if not df_chunk.empty:
-            chunks.append(_clean(df_chunk))
-        chunk_end = chunk_start - timedelta(minutes=15)
-
-    if chunks:
-        m15 = pd.concat(chunks).sort_index()
-        m15 = m15[~m15.index.duplicated(keep="first")]
+    # ---- M15 ----
+    logger.info("Descargando M15...")
+    m15 = yf.download(
+        SYMBOL,
+        start=start.strftime("%Y-%m-%d"),
+        end=end.strftime("%Y-%m-%d"),
+        interval="15m",
+        auto_adjust=True,
+        progress=False,
+    )
+    if not m15.empty:
+        m15 = _clean(m15)
     else:
         m15 = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
 
