@@ -4,28 +4,23 @@ capital_guard.py
 Guardian de capital progresivo — Estrategia WDC Hibrida
 Weekly Double Compounding: $50 -> $100 -> $200 ...
 
-Version WDC HIGH WR — TP reducido para maximizar Win Rate:
-  Configuracion anterior:  WR~48.6%, PF=1.73, SL=8p, TP=16p, RR 1:2
-  Configuracion actual:    WR>52%+,  SL=8p, TP=12p, RR 1:1.5
-
-  Razon del cambio: al acercar el TP de 16 a 12 pips, el precio lo
-  alcanza significativamente mas veces antes de revertirse, subiendo
-  el Win Rate por encima del 50%. Con un 34% WR ya serías rentable
-  con RR 1:1.5, por lo que cualquier WR > 40% es ganancia neta.
+Version WDC SWEET SPOT — Confirmado por Monte Carlo:
+  Backtest:  WR=48.6%, PF=1.73, DD=12%, 72 trades en 2 anios
+  MC 5%:     90.1% duplican | 2.0% ruina | Mediana $210 | P95 $587
 
   Fase CRECIMIENTO  : 5% de riesgo por operacion  <- SWEET SPOT MC
   Fase CONSOLIDACION: 3% de riesgo (gano >50% del objetivo diario)
   Fase ESCUDO       : 1% de riesgo (meta diaria alcanzada o viernes)
 
   Horario operativo : 2:00 AM - 11:00 AM hora Colombia (UTC-5)
-  SL: 8.0 pips | TP: 12.0 pips | RR 1:1.5
+  SL: 8.0 pips | TP: 16.0 pips | RR 1:2
 
-  MATH CHECK 5% (nuevo TP=12p):
+  MATH CHECK 5% (TP=16p):
     - Capital $50 | lote = $50*5% / (8*$10) = 0.03
-    - Ganancia por TP: 0.03 * 12 * $10 = $3.60 (+7.2%)
+    - Ganancia por TP: 0.03 * 16 * $10 = $4.80 (+9.6%)
     - Perdida por SL : 0.03 * 8  * $10 = $2.40 (-4.8%)
     - Para duplicar a $100: necesitas net +$50
-    - Con RR 1:1.5: WR breakeven = 40% | con >52% WR = rentable
+    - Con 48.6% WR y RR 1:2: esperanza positiva y compounding acelerado
 ================================================
 """
 
@@ -41,9 +36,9 @@ TRADE_HOUR_END_UTC   = 16   # 11:00 AM Colombia
 
 class CapitalGuard:
     # SL y TP fijos para todas las fases (en pips)
-    # TP reducido 16->12 para aumentar Win Rate (RR 1:2 -> 1:1.5)
+    # Configuración original WDC: RR 1:2
     SL_PIPS = 8.0
-    TP_PIPS = 12.0
+    TP_PIPS = 16.0
 
     # -- Riesgos por fase (Sweet Spot confirmado por MC) -------------------
     RIESGO_CRECIMIENTO   = 0.05   # 5%  <- Sweet Spot: 90.1% duplican, 2% ruina
@@ -187,7 +182,7 @@ class CapitalGuard:
         lote_calc     = (capital_activo * riesgo) / (self.SL_PIPS * 10)
         lote_sugerido = max(0.01, round(lote_calc, 2))
 
-        # Ganancia por TP y TPs necesarios para la meta (TP=12p, RR 1:1.5)
+        # Ganancia por TP y TPs necesarios para la meta (TP=16p, RR 1:2)
         ganancia_tp    = lote_sugerido * self.TP_PIPS * 10
         restante       = max(0.0, daily_target - p_day)
         tps_necesarios = math.ceil(restante / ganancia_tp) if ganancia_tp > 0 else float("inf")
@@ -205,9 +200,9 @@ class CapitalGuard:
             f"  Fase Actual         : {phase}\n"
             f"  Riesgo por operacion: {riesgo*100:.0f}%\n"
             f"  Lote Sugerido       : {lote_sugerido}\n"
-            f"  Ganancia por TP     : ${ganancia_tp:.2f} (RR 1:1.5)\n"
+            f"  Ganancia por TP     : ${ganancia_tp:.2f} (RR 1:2)\n"
             f"  TPs para meta dia   : {tps_necesarios}\n"
             f"  Racha SL hoy        : {sl_streak}/{self.MAX_CONSECUTIVE_SL}\n"
-            f"  SL={self.SL_PIPS}p | TP={self.TP_PIPS}p | RR 1:1.5\n"
+            f"  SL={self.SL_PIPS}p | TP={self.TP_PIPS}p | RR 1:2\n"
             f"  Puede operar        : {'SI' if can_trade else 'NO'} — {reason}\n"
         )
