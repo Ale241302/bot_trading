@@ -1,14 +1,18 @@
 """
 signal_engine.py
-Replica determinista del arbol de 4 niveles del prompt.md WDC Híbrida v2.0.
+Replica determinista del arbol de 4 niveles del prompt.md WDC Hibrida v2.0.
 
 Cambios v4 (2026-04-22):
 - FIX #2: get_trend() umbral aumentado de 0.03% a 0.10% para EURUSD.
-  Con 0.03% el filtro no filtraba nada; 0.10% es más significativo.
+  Con 0.03% el filtro no filtraba nada; 0.10% es mas significativo.
 - FIX #3: Pin Bar relajada — mecha >= 55% (era 60%), cuerpo <= 35% (era 30%),
-  mecha contraria <= 25% (era 20%). Más señales sin perder calidad.
-- FIX #3b: Envolvente relajada — permite que curr_o esté dentro del cuerpo
+  mecha contraria <= 25% (era 20%). Mas senales sin perder calidad.
+- FIX #3b: Envolvente relajada — permite que curr_o este dentro del cuerpo
   anterior en lugar de exigir toque exacto (curr_o <= prev_c).
+- FIX #6: Weekly Trend Lock — bloquea trades contra la tendencia de las
+  ultimas 5 velas H4 (~5 dias). Si el precio cayo >0.3% en H4[-5:] bloquea
+  BUY; si subio >0.3% bloquea SELL. Elimina entradas en contra de tendencia
+  semanal (racha de BUY fallidos Apr 14-21 por ejemplo).
 """
 import numpy as np
 import pandas as pd
@@ -29,10 +33,10 @@ def get_trend(df: pd.DataFrame, sma_period: int = 50) -> str:
     """
     Tendencia basada en SMA50.
     FIX v4: umbral subido a 0.10% (era 0.03%).
-    EURUSD se mueve 0.5-1% diario; 0.03% no filtraba nada útil.
+    EURUSD se mueve 0.5-1% diario; 0.03% no filtraba nada util.
     BUY  -> precio >0.10% por encima de SMA50
     SELL -> precio >0.10% por debajo de SMA50
-    NEUTRAL -> dentro del margen ±0.10%
+    NEUTRAL -> dentro del margen +/-0.10%
     """
     if len(df) < sma_period:
         return "NEUTRAL"
@@ -42,11 +46,27 @@ def get_trend(df: pd.DataFrame, sma_period: int = 50) -> str:
         return "NEUTRAL"
     last_close = close.iloc[-1]
     diff_pct = (last_close - sma_val) / sma_val
-    if diff_pct > 0.0010:       # FIX: era 0.0003 → ahora 0.0010
+    if diff_pct > 0.0010:
         return "BUY"
-    elif diff_pct < -0.0010:    # FIX: era -0.0003 → ahora -0.0010
+    elif diff_pct < -0.0010:
         return "SELL"
     return "NEUTRAL"
+
+
+def get_weekly_change(h4: pd.DataFrame, lookback: int = 5) -> float:
+    """
+    FIX #6: Calcula el cambio porcentual del precio en las ultimas
+    `lookback` velas H4 (~5 dias de mercado).
+    Retorna el cambio como decimal (0.003 = +0.3%, -0.003 = -0.3%).
+    Retorna 0.0 si no hay suficientes datos.
+    """
+    if len(h4) < lookback + 1:
+        return 0.0
+    price_now  = h4["Close"].iloc[-1]
+    price_then = h4["Close"].iloc[-(lookback + 1)]
+    if price_then == 0:
+        return 0.0
+    return (price_now - price_then) / price_then
 
 
 # ─────────────────────────────────────────────
@@ -55,7 +75,7 @@ def get_trend(df: pd.DataFrame, sma_period: int = 50) -> str:
 
 def _is_pin_bar_bullish(o: float, h: float, l: float, c: float) -> bool:
     """
-    FIX v4: criterios relajados para capturar más señales válidas.
+    FIX v4: criterios relajados para capturar mas senales validas.
     Mecha inferior >= 55% del rango (era 60%)
     Cuerpo <= 35% del rango (era 30%)
     Mecha superior <= 25% del rango (era 20%)
@@ -77,7 +97,7 @@ def _is_pin_bar_bullish(o: float, h: float, l: float, c: float) -> bool:
 
 def _is_pin_bar_bearish(o: float, h: float, l: float, c: float) -> bool:
     """
-    FIX v4: criterios relajados para capturar más señales válidas.
+    FIX v4: criterios relajados para capturar mas senales validas.
     Mecha superior >= 55% del rango (era 60%)
     Cuerpo <= 35% del rango (era 30%)
     Mecha inferior <= 25% del rango (era 20%)
@@ -99,34 +119,34 @@ def _is_pin_bar_bearish(o: float, h: float, l: float, c: float) -> bool:
 
 def _is_engulfing_bullish(prev_o, prev_c, curr_o, curr_c) -> bool:
     """
-    FIX v4: permite que curr_o esté dentro del cuerpo bajista anterior.
+    FIX v4: permite que curr_o este dentro del cuerpo bajista anterior.
     La vela actual debe ser alcista y engullir el cuerpo previo bajista.
     """
     return (
-        prev_c < prev_o                          # vela previa bajista
-        and curr_c > curr_o                      # vela actual alcista
-        and curr_o < prev_o                      # FIX: era <= prev_c (muy estricto)
-        and curr_c > prev_o                      # FIX: cierre supera apertura anterior
+        prev_c < prev_o
+        and curr_c > curr_o
+        and curr_o < prev_o
+        and curr_c > prev_o
     )
 
 
 def _is_engulfing_bearish(prev_o, prev_c, curr_o, curr_c) -> bool:
     """
-    FIX v4: permite que curr_o esté dentro del cuerpo alcista anterior.
+    FIX v4: permite que curr_o este dentro del cuerpo alcista anterior.
     La vela actual debe ser bajista y engullir el cuerpo previo alcista.
     """
     return (
-        prev_c > prev_o                          # vela previa alcista
-        and curr_c < curr_o                      # vela actual bajista
-        and curr_o > prev_o                      # FIX: era >= prev_c (muy estricto)
-        and curr_c < prev_o                      # FIX: cierre rompe apertura anterior
+        prev_c > prev_o
+        and curr_c < curr_o
+        and curr_o > prev_o
+        and curr_c < prev_o
     )
 
 
 def detect_pattern(m15: pd.DataFrame, bias: str) -> str | None:
     """
     Acepta PinBar y Envolvente confirmados.
-    v4: criterios más realistas sin perder lógica de confluencia.
+    v4: criterios mas realistas sin perder logica de confluencia.
     """
     if len(m15) < 3:
         return None
@@ -154,11 +174,11 @@ def detect_pattern(m15: pd.DataFrame, bias: str) -> str | None:
 
 def simulate_sentiment(rng: np.random.Generator) -> dict:
     """
-    Distribución más realista para EURUSD:
-    El retail tiende a estar 55-65% long en EURUSD históricamente.
-    Se usa desviación 12 (era 15) para evitar extremos irreales.
+    Distribucion mas realista para EURUSD:
+    El retail tiende a estar 55-65% long en EURUSD historicamente.
+    Se usa desviacion 12 (era 15) para evitar extremos irreales.
     """
-    long_pct = float(np.clip(rng.normal(60, 12), 35, 85))   # FIX: media 60% long (EURUSD real)
+    long_pct = float(np.clip(rng.normal(60, 12), 35, 85))
     short_pct = 100.0 - long_pct
     return {"short_pct": short_pct, "long_pct": long_pct}
 
@@ -180,14 +200,15 @@ def evaluate_confluence(
     news_block: bool,
 ) -> Tuple[str, str, dict]:
     """
-    Árbol WDC Híbrida v2.0 — 4 niveles estrictos.
+    Arbol WDC Hibrida v2.0 — 4 niveles estrictos + Weekly Trend Lock.
 
+    N0: Weekly Trend Lock (FIX #6) — bloquea trades contra tendencia semanal H4
     N1: Noticias HIGH -> HOLD
     N2: Tendencia Macro H4 + H1 -> define bias (BUY/SELL) o HOLD si conflicto
     N3: Sentimiento confirma tendencia:
         - bias=SELL: long_pct > 60% requerido (masa atrapada comprando)
         - bias=BUY:  short_pct > 60% requerido (masa atrapada vendiendo)
-        - Neutro (40-60%): avanza solo si la tendencia es clara y unánime
+        - Neutro (40-60%): avanza solo si la tendencia es clara y unanime
     N4: Patron de vela confirmado (PinBar o Envolvente)
     """
     levels = {
@@ -226,6 +247,36 @@ def evaluate_confluence(
     bias = h4_trend if h4_trend != "NEUTRAL" else h1_trend
     levels["nivel_2_sentimiento"] = f"OK — H4={h4_trend} H1={h1_trend} → bias={bias}"
 
+    # ── FIX #6: Weekly Trend Lock ─────────────────────────────────────────────
+    # Bloquea entradas en contra de la tendencia de los ultimos ~5 dias H4.
+    # Umbral 0.3%: suficiente para detectar tendencia semanal sin ser hiper-restrictivo.
+    weekly_change = get_weekly_change(h4, lookback=5)
+    WEEKLY_LOCK_THRESHOLD = 0.003  # 0.3%
+
+    if bias == "BUY" and weekly_change < -WEEKLY_LOCK_THRESHOLD:
+        levels["nivel_3_tendencia"] = (
+            f"FALLO — Weekly Trend Lock: precio cayo {weekly_change*100:.2f}% en 5 velas H4, "
+            f"no comprar contra tendencia bajista semanal"
+        )
+        levels["nivel_4_patron"] = "NO EVALUADO"
+        return (
+            "HOLD",
+            f"N2b FALLO: Weekly Lock BUY bloqueado (cambio semanal H4={weekly_change*100:.2f}%)",
+            levels,
+        )
+
+    if bias == "SELL" and weekly_change > WEEKLY_LOCK_THRESHOLD:
+        levels["nivel_3_tendencia"] = (
+            f"FALLO — Weekly Trend Lock: precio subio {weekly_change*100:.2f}% en 5 velas H4, "
+            f"no vender contra tendencia alcista semanal"
+        )
+        levels["nivel_4_patron"] = "NO EVALUADO"
+        return (
+            "HOLD",
+            f"N2b FALLO: Weekly Lock SELL bloqueado (cambio semanal H4={weekly_change*100:.2f}%)",
+            levels,
+        )
+
     # ── NIVEL 3: Sentimiento confirma la tendencia ────────────────────────────
     short_pct = sentiment["short_pct"]
     long_pct = sentiment["long_pct"]
@@ -237,7 +288,7 @@ def evaluate_confluence(
             )
         elif short_pct >= 60:
             levels["nivel_3_tendencia"] = (
-                f"FALLO — {short_pct:.0f}% retail short (masa en tu misma dirección, riesgo squeeze)"
+                f"FALLO — {short_pct:.0f}% retail short (masa en tu misma direccion, riesgo squeeze)"
             )
             levels["nivel_4_patron"] = "NO EVALUADO"
             return "HOLD", f"N3 FALLO: masa vende {short_pct:.0f}% con tendencia SELL — riesgo squeeze", levels
@@ -262,7 +313,7 @@ def evaluate_confluence(
             )
         elif long_pct >= 60:
             levels["nivel_3_tendencia"] = (
-                f"FALLO — {long_pct:.0f}% retail long (masa en tu misma dirección, riesgo)"
+                f"FALLO — {long_pct:.0f}% retail long (masa en tu misma direccion, riesgo)"
             )
             levels["nivel_4_patron"] = "NO EVALUADO"
             return "HOLD", f"N3 FALLO: masa compra {long_pct:.0f}% con tendencia BUY — riesgo", levels
