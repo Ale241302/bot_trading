@@ -9,19 +9,17 @@ Cambios v4 (2026-04-22):
   mecha contraria <= 25% (era 20%). Mas senales sin perder calidad.
 - FIX #3b: Envolvente relajada — permite que curr_o este dentro del cuerpo
   anterior en lugar de exigir toque exacto (curr_o <= prev_c).
-- FIX #6: Weekly Trend Lock — bloquea trades contra la tendencia de las
-  ultimas 5 velas H4 (~5 dias). Si el precio cayo >0.3% en H4[-5:] bloquea
-  BUY; si subio >0.3% bloquea SELL. Elimina entradas en contra de tendencia
-  semanal (racha de BUY fallidos Apr 14-21 por ejemplo).
+- REVERT FIX #6: Weekly Trend Lock eliminado — empeoro WR y DD con periodo
+  de datos corto (~2 meses). Requiere minimo 6 meses de historia para calibrar.
 """
 import numpy as np
 import pandas as pd
 from typing import Tuple
 
 
-# ─────────────────────────────────────────────
+# —————————————————————————————————————————————
 # UTILIDADES DE TENDENCIA
-# ─────────────────────────────────────────────
+# —————————————————————————————————————————————
 
 def _sma(series: pd.Series, period: int) -> float:
     if len(series) < period:
@@ -46,32 +44,16 @@ def get_trend(df: pd.DataFrame, sma_period: int = 50) -> str:
         return "NEUTRAL"
     last_close = close.iloc[-1]
     diff_pct = (last_close - sma_val) / sma_val
-    if diff_pct > 0.0010:
+    if diff_pct > 0.0010:       # FIX: era 0.0003 → ahora 0.0010
         return "BUY"
-    elif diff_pct < -0.0010:
+    elif diff_pct < -0.0010:    # FIX: era -0.0003 → ahora -0.0010
         return "SELL"
     return "NEUTRAL"
 
 
-def get_weekly_change(h4: pd.DataFrame, lookback: int = 5) -> float:
-    """
-    FIX #6: Calcula el cambio porcentual del precio en las ultimas
-    `lookback` velas H4 (~5 dias de mercado).
-    Retorna el cambio como decimal (0.003 = +0.3%, -0.003 = -0.3%).
-    Retorna 0.0 si no hay suficientes datos.
-    """
-    if len(h4) < lookback + 1:
-        return 0.0
-    price_now  = h4["Close"].iloc[-1]
-    price_then = h4["Close"].iloc[-(lookback + 1)]
-    if price_then == 0:
-        return 0.0
-    return (price_now - price_then) / price_then
-
-
-# ─────────────────────────────────────────────
+# —————————————————————————————————————————————
 # DETECCION DE PATRONES (NIVEL 4)
-# ─────────────────────────────────────────────
+# —————————————————————————————————————————————
 
 def _is_pin_bar_bullish(o: float, h: float, l: float, c: float) -> bool:
     """
@@ -168,9 +150,9 @@ def detect_pattern(m15: pd.DataFrame, bias: str) -> str | None:
     return None
 
 
-# ─────────────────────────────────────────────
+# —————————————————————————————————————————————
 # SIMULACION DE INPUTS EXTERNOS
-# ─────────────────────────────────────────────
+# —————————————————————————————————————————————
 
 def simulate_sentiment(rng: np.random.Generator) -> dict:
     """
@@ -187,9 +169,9 @@ def simulate_av_score(rng: np.random.Generator) -> float:
     return float(np.clip(rng.normal(0.0, 0.15), -0.50, 0.50))
 
 
-# ─────────────────────────────────────────────
+# —————————————————————————————————————————————
 # MOTOR DE CONFLUENCIA PRINCIPAL v4
-# ─────────────────────────────────────────────
+# —————————————————————————————————————————————
 
 def evaluate_confluence(
     m15: pd.DataFrame,
@@ -200,9 +182,8 @@ def evaluate_confluence(
     news_block: bool,
 ) -> Tuple[str, str, dict]:
     """
-    Arbol WDC Hibrida v2.0 — 4 niveles estrictos + Weekly Trend Lock.
+    Arbol WDC Hibrida v2.0 — 4 niveles estrictos.
 
-    N0: Weekly Trend Lock (FIX #6) — bloquea trades contra tendencia semanal H4
     N1: Noticias HIGH -> HOLD
     N2: Tendencia Macro H4 + H1 -> define bias (BUY/SELL) o HOLD si conflicto
     N3: Sentimiento confirma tendencia:
@@ -218,7 +199,7 @@ def evaluate_confluence(
         "nivel_4_patron": "",
     }
 
-    # ── NIVEL 1: Noticias ─────────────────────────────────────────────────────
+    # ── NIVEL 1: Noticias ──────────────────────────────────────────────────────
     if news_block:
         levels["nivel_1_noticias"] = "FALLO — evento HIGH impact"
         levels["nivel_2_sentimiento"] = "NO EVALUADO"
@@ -228,7 +209,7 @@ def evaluate_confluence(
 
     levels["nivel_1_noticias"] = "OK — sin eventos HIGH"
 
-    # ── NIVEL 2: Tendencia Macro H4 + H1 ─────────────────────────────────────
+    # ── NIVEL 2: Tendencia Macro H4 + H1 ──────────────────────────────────────
     h4_trend = get_trend(h4)
     h1_trend = get_trend(h1)
 
@@ -247,37 +228,7 @@ def evaluate_confluence(
     bias = h4_trend if h4_trend != "NEUTRAL" else h1_trend
     levels["nivel_2_sentimiento"] = f"OK — H4={h4_trend} H1={h1_trend} → bias={bias}"
 
-    # ── FIX #6: Weekly Trend Lock ─────────────────────────────────────────────
-    # Bloquea entradas en contra de la tendencia de los ultimos ~5 dias H4.
-    # Umbral 0.3%: suficiente para detectar tendencia semanal sin ser hiper-restrictivo.
-    weekly_change = get_weekly_change(h4, lookback=5)
-    WEEKLY_LOCK_THRESHOLD = 0.003  # 0.3%
-
-    if bias == "BUY" and weekly_change < -WEEKLY_LOCK_THRESHOLD:
-        levels["nivel_3_tendencia"] = (
-            f"FALLO — Weekly Trend Lock: precio cayo {weekly_change*100:.2f}% en 5 velas H4, "
-            f"no comprar contra tendencia bajista semanal"
-        )
-        levels["nivel_4_patron"] = "NO EVALUADO"
-        return (
-            "HOLD",
-            f"N2b FALLO: Weekly Lock BUY bloqueado (cambio semanal H4={weekly_change*100:.2f}%)",
-            levels,
-        )
-
-    if bias == "SELL" and weekly_change > WEEKLY_LOCK_THRESHOLD:
-        levels["nivel_3_tendencia"] = (
-            f"FALLO — Weekly Trend Lock: precio subio {weekly_change*100:.2f}% en 5 velas H4, "
-            f"no vender contra tendencia alcista semanal"
-        )
-        levels["nivel_4_patron"] = "NO EVALUADO"
-        return (
-            "HOLD",
-            f"N2b FALLO: Weekly Lock SELL bloqueado (cambio semanal H4={weekly_change*100:.2f}%)",
-            levels,
-        )
-
-    # ── NIVEL 3: Sentimiento confirma la tendencia ────────────────────────────
+    # ── NIVEL 3: Sentimiento confirma la tendencia ─────────────────────────────
     short_pct = sentiment["short_pct"]
     long_pct = sentiment["long_pct"]
 
@@ -331,7 +282,7 @@ def evaluate_confluence(
                 levels["nivel_4_patron"] = "NO EVALUADO"
                 return "HOLD", "N3 FALLO: sentimiento neutro sin tendencia unanime", levels
 
-    # ── NIVEL 4: Patron de entrada ────────────────────────────────────────────
+    # ── NIVEL 4: Patron de entrada ─────────────────────────────────────────────
     pattern = detect_pattern(m15, bias)
     if not pattern:
         levels["nivel_4_patron"] = f"FALLO — sin patron valido para {bias} (solo PinBar/Envolvente)"
