@@ -10,15 +10,18 @@ Cambios v4 (2026-04-22):
   con variacion +-10% por vela para simular cambios intraday.
 - FIX #4: Filtro de horario Colombia aplicado al backtest (7:00-16:00 UTC).
   El bot real no opera fuera de ese rango; el backtest tampoco debe.
-- FIX #5: MAX_CONSECUTIVE_SL=3 — circuit breaker igual al CapitalGuard real.
-  Si hay 3 SL consecutivos, pausa operaciones hasta el dia siguiente.
-  Elimina rachas destructoras (ej: 5-6 SL seguidos de Apr 14-21).
+- FIX #5: MAX_CONSECUTIVE_SL=3 (diario) — circuit breaker igual al CapitalGuard real.
+  Si hay 3 SL CONSECUTIVOS en el dia, pausa hasta el dia siguiente.
   El contador se resetea al inicio de cada dia o cuando entra un TP.
 - FIX #7: H1_LOOKBACK=100 y H4_LOOKBACK=100 — lookback FIJO e independiente
   del M15 lookback. Con H1/H4 de 2 anios, usar iloc[-60] tomaba velas de
   2024-2025 para calcular la SMA50, distorsionando la tendencia actual.
-  100 velas H1 = ~4 dias de contexto reciente; 100 velas H4 = ~17 dias.
-  Ambos cubren exactamente la SMA50 + margen sin incluir historia vieja.
+- FIX #8: MAX_SL_WEEK=5 (semanal) — circuit breaker SEMANAL.
+  Si hay 5 SL en los ultimos 7 dias (no necesariamente consecutivos),
+  pausa TODAS las operaciones hasta el lunes de la semana siguiente.
+  Esto corta rachas como Abr 14-21 donde el mercado invertia bruscamente
+  y el bot seguia operando en la misma direccion perdedora dia tras dia.
+  El contador semanal NO se resetea con TPs — solo al iniciar nueva semana.
 """
 import numpy as np
 import pandas as pd
@@ -35,28 +38,27 @@ MAX_TRADES_SIMULTANEOUS = {"CRECIMIENTO": 1, "CONSOLIDACION": 1, "ESCUDO": 1}
 MAX_TRADES_PER_DAY      = 3
 DAILY_STOP_PCT          = -0.06
 
-# FIX #5: Circuit breaker — igual al CapitalGuard del bot real
-MAX_CONSECUTIVE_SL = 3   # Pausa el dia si hay 3 SL seguidos
+# FIX #5: Circuit breaker DIARIO — 3 SL consecutivos pausa el dia
+MAX_CONSECUTIVE_SL = 3
 
-# FIX #4: Horario Colombia — igual al CapitalGuard del bot real
-TRADE_HOUR_START_UTC = 7    # 02:00 AM Colombia (UTC-5)
-TRADE_HOUR_END_UTC   = 16   # 11:00 AM Colombia (UTC-5)
+# FIX #8: Circuit breaker SEMANAL — 5 SL en 7 dias pausa la semana
+# Corta rachas multi-dia como Abr 14-21 donde el mercado invierte
+# bruscamente y el bot sigue perdiendo dia tras dia.
+MAX_SL_WEEK = 5
+
+# FIX #4: Horario Colombia
+TRADE_HOUR_START_UTC = 7
+TRADE_HOUR_END_UTC   = 16
 
 NEWS_PROB = 0.008
 
-# FIX #7: Lookback FIJO para H1 y H4, independiente del M15 lookback.
-# SMA50 necesita exactamente 50 velas; damos 100 para tener margen.
-# H1: 100 velas = ~4 dias de precios recientes.
-# H4: 100 velas = ~17 dias de precios recientes.
-# NUNCA usar iloc[-lookback_m15] para H1/H4 — con datos de 2 anios
-# eso incluiria precios de 2024 que distorsionan la SMA50 actual.
+# FIX #7: Lookback FIJO para H1/H4
 H1_LOOKBACK = 100
 H4_LOOKBACK = 100
 
 
 def _get_phase(capital: float, capital_week_start: float, pnl_day: float) -> str:
     pct_towards_daily = (capital - capital_week_start) / (capital_week_start * 0.15 + 1e-9)
-
     if pnl_day / (capital_week_start + 1e-9) <= DAILY_STOP_PCT:
         return "STOP_DIA"
     if pct_towards_daily >= 1.0:
@@ -75,15 +77,18 @@ def _pip_to_usd(pips: float, lot: float) -> float:
     return pips * lot * 10.0
 
 
+def _next_monday(date) -> "datetime.date":
+    """Devuelve la fecha del lunes siguiente a 'date'."""
+    import datetime
+    days_ahead = 7 - date.weekday()   # weekday(): Mon=0 ... Sun=6
+    return date + datetime.timedelta(days=days_ahead)
+
+
 def sentiment_for_backtest(rng: np.random.Generator, base_long_pct: float = 62.0) -> dict:
     """
     FIX #1: Sentimiento mas realista para backtest EURUSD.
-
-    En lugar de generar valores completamente aleatorios, usa como base
-    el sesgo historico real del retail en EURUSD (~60-65% long) con una
-    variacion gaussiana +-10% por vela para simular fluctuaciones intraday.
-
-    base_long_pct: Porcentaje base de retail long (default 62% = promedio historico EURUSD).
+    Usa el sesgo historico real del retail (~62% long) con variacion
+    gaussiana +-10% por vela para simular fluctuaciones intraday.
     """
     noise     = rng.normal(0, 10)
     long_pct  = float(np.clip(base_long_pct + noise, 30, 85))
@@ -102,12 +107,12 @@ def run_backtest(
     Para cada vela evalua la confluencia y simula el trade.
     Retorna DataFrame con todas las operaciones ejecutadas.
 
-    v4 + FIX #7:
-    - Sentimiento basado en sesgo historico real EURUSD (FIX #1).
-    - Horario Colombia 7:00-16:00 UTC aplicado (FIX #4).
-    - Circuit breaker MAX_CONSECUTIVE_SL=3 (FIX #5).
-    - H1/H4 usan lookback fijo (H1_LOOKBACK=100, H4_LOOKBACK=100) para
-      que la SMA50 calcule siempre sobre precios recientes (FIX #7).
+    v4 + FIX #7 + FIX #8:
+    - FIX #1: Sentimiento basado en sesgo historico real EURUSD.
+    - FIX #4: Horario Colombia 7:00-16:00 UTC.
+    - FIX #5: Circuit breaker DIARIO (3 SL consecutivos -> pausa dia).
+    - FIX #7: H1/H4 lookback fijo 100 velas.
+    - FIX #8: Circuit breaker SEMANAL (5 SL en 7 dias -> pausa semana).
     """
     rng = np.random.default_rng(seed)
     m15_full = frames["M15"]
@@ -123,12 +128,16 @@ def run_backtest(
     last_date    = None
     last_week    = None
 
-    # FIX #5: contador de SL consecutivos
+    # FIX #5: circuit breaker DIARIO
     consecutive_sl      = 0
-    sl_pause_until_date = None   # fecha hasta la que se pausa (None = sin pausa)
+    sl_pause_until_date = None
+
+    # FIX #8: circuit breaker SEMANAL
+    # sl_week_dates: lista de fechas de cada SL ocurrido (ventana rolling 7 dias)
+    sl_week_dates          = []          # list[datetime.date]
+    weekly_pause_until     = None        # date hasta la que esta pausada la semana
 
     active_exit_times = []
-
     start_idx = max(lookback, 60)
 
     print(f"[Backtest] Iniciando simulacion: {len(m15_full) - start_idx} velas M15")
@@ -136,48 +145,48 @@ def run_backtest(
     print(f"[Backtest] Limites v4: max {MAX_TRADES_PER_DAY} trades/dia, "
           f"max {MAX_TRADES_SIMULTANEOUS['CRECIMIENTO']} simultaneo")
     print(f"[Backtest] Horario Colombia: {TRADE_HOUR_START_UTC}:00 - {TRADE_HOUR_END_UTC}:00 UTC")
-    print(f"[Backtest] Circuit breaker: pausa tras {MAX_CONSECUTIVE_SL} SL consecutivos")
-    print(f"[Backtest] FIX #7: H1 lookback={H1_LOOKBACK} velas, H4 lookback={H4_LOOKBACK} velas")
+    print(f"[Backtest] CB diario : pausa tras {MAX_CONSECUTIVE_SL} SL consecutivos")
+    print(f"[Backtest] CB semanal: pausa semana tras {MAX_SL_WEEK} SL en 7 dias")
+    print(f"[Backtest] FIX #7: H1 lookback={H1_LOOKBACK}, H4 lookback={H4_LOOKBACK} velas")
 
     for i in tqdm(range(start_idx, len(m15_full)), desc="Simulando velas"):
         ts    = m15_full.index[i]
         m15_w = m15_full.iloc[i - lookback: i + 1].copy()
 
-        # FIX #7: lookback FIJO para H1 y H4 — no usar el lookback de M15.
-        # Con H1/H4 de 2 anios, iloc[-60] tomaria velas de 2024 que
-        # distorsionan la SMA50 respecto al contexto actual del mercado.
         h1_w = h1_full[h1_full.index <= ts].iloc[-H1_LOOKBACK:].copy()
         h4_w = h4_full[h4_full.index <= ts].iloc[-H4_LOOKBACK:].copy()
 
         if len(h1_w) < 10 or len(h4_w) < 5:
             continue
 
-        # Reset contadores de dia / semana
         current_date = ts.date()
         current_week = ts.isocalendar()[:2]
 
+        # ── Reset diario ────────────────────────────────────────────
         if last_date != current_date:
             pnl_day             = 0.0
             trades_today        = 0
             last_date           = current_date
-            # FIX #5: el circuit breaker se resetea al inicio de cada nuevo dia
             consecutive_sl      = 0
             sl_pause_until_date = None
 
+        # ── Reset semanal de capital ─────────────────────────────────
         if last_week != current_week:
             capital_week_start = capital
             last_week          = current_week
+            # FIX #8: al empezar nueva semana se levanta la pausa semanal
+            weekly_pause_until = None
 
-        # FIX #4: Filtro horario Colombia (7:00 - 16:00 UTC)
+        # ── FIX #4: Horario Colombia ─────────────────────────────────
         if not (TRADE_HOUR_START_UTC <= ts.hour < TRADE_HOUR_END_UTC):
             continue
 
-        # Fase de capital
+        # ── Fase de capital ──────────────────────────────────────────
         phase = _get_phase(capital, capital_week_start, pnl_day)
         if phase == "STOP_DIA":
             continue
 
-        # Viernes despues de 17:00 UTC -> HOLD
+        # Viernes despues de 17:00 UTC
         if ts.weekday() == 4 and ts.hour >= 17:
             continue
 
@@ -185,9 +194,18 @@ def run_backtest(
         if trades_today >= MAX_TRADES_PER_DAY:
             continue
 
-        # FIX #5: Circuit breaker activo — saltamos el resto del dia
+        # ── FIX #5: CB diario ────────────────────────────────────────
         if sl_pause_until_date is not None and current_date <= sl_pause_until_date:
             continue
+
+        # ── FIX #8: CB semanal ───────────────────────────────────────
+        # Limpiar SL con mas de 7 dias de antiguedad (ventana rolling)
+        import datetime
+        cutoff = current_date - datetime.timedelta(days=7)
+        sl_week_dates = [d for d in sl_week_dates if d > cutoff]
+
+        if weekly_pause_until is not None and current_date < weekly_pause_until:
+            continue   # semana bloqueada — saltar vela
 
         # Limite trades simultaneos
         active_exit_times = [t for t in active_exit_times if t > ts]
@@ -195,12 +213,12 @@ def run_backtest(
         if len(active_exit_times) >= max_simultaneous:
             continue
 
-        # Inputs externos
+        # ── Inputs externos ──────────────────────────────────────────
         news_block = rng.random() < NEWS_PROB
-        sentiment  = sentiment_for_backtest(rng)   # FIX #1
+        sentiment  = sentiment_for_backtest(rng)
         av_score   = simulate_av_score(rng)
 
-        # Evaluar confluencia
+        # ── Evaluar confluencia ──────────────────────────────────────
         action, reason, conf_levels = evaluate_confluence(
             m15_w, h1_w, h4_w, sentiment, av_score, news_block
         )
@@ -208,11 +226,11 @@ def run_backtest(
         if action == "HOLD":
             continue
 
-        # Ejecutar trade
-        risk_pct = RISK_PCT.get(phase, 0.02)
-        lot      = _lot_size(capital, risk_pct)
-
+        # ── Ejecutar trade ───────────────────────────────────────────
+        risk_pct    = RISK_PCT.get(phase, 0.02)
+        lot         = _lot_size(capital, risk_pct)
         entry_price = m15_full.iloc[i]["Close"]
+
         if action == "BUY":
             sl_price = entry_price - SL_PIPS * PIP_SIZE
             tp_price = entry_price + TP_PIPS * PIP_SIZE
@@ -256,7 +274,7 @@ def run_backtest(
             exit_idx   = max_future - 1
             exit_price = m15_full.iloc[exit_idx]["Close"]
 
-        # Calcular PnL
+        # ── PnL ──────────────────────────────────────────────────────
         if action == "BUY":
             pips_result = (exit_price - entry_price) / PIP_SIZE
         else:
@@ -266,14 +284,22 @@ def run_backtest(
         capital  += pnl_usd
         pnl_day  += pnl_usd
 
-        # FIX #5: actualizar contador de SL consecutivos
+        # ── Actualizar circuit breakers ──────────────────────────────
         if outcome == "SL":
+            # CB diario
             consecutive_sl += 1
             if consecutive_sl >= MAX_CONSECUTIVE_SL:
                 sl_pause_until_date = current_date
-                print(f"[Backtest] Circuit breaker activado en {ts.date()} "
-                      f"tras {consecutive_sl} SL consecutivos — pausando dia")
+                print(f"[CB-Diario]  {ts.date()} — {consecutive_sl} SL consecutivos -> pausa hoy")
+
+            # FIX #8: CB semanal (ventana rolling 7 dias)
+            sl_week_dates.append(current_date)
+            if len(sl_week_dates) >= MAX_SL_WEEK and weekly_pause_until is None:
+                weekly_pause_until = _next_monday(current_date)
+                print(f"[CB-Semanal] {ts.date()} — {len(sl_week_dates)} SL en 7 dias "
+                      f"-> pausa hasta {weekly_pause_until}")
         else:
+            # Solo el CB diario se resetea con TP
             consecutive_sl = 0
 
         exit_timestamp = m15_full.index[exit_idx]
