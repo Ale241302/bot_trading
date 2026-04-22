@@ -13,7 +13,7 @@ Variables de entorno requeridas:
 
 import os
 import logging
-from urllib.parse import quote, unquote
+from urllib.parse import unquote
 
 import requests
 
@@ -74,6 +74,10 @@ class MyfxbookClient:
             )
             return False
 
+        # Guardar el token TAL CUAL lo devuelve la API (ya viene URL-encoded).
+        # NO aplicar unquote() aquí: el token contiene caracteres especiales
+        # (%2B, %2F, %3D) que deben mantenerse encoded para que la API los
+        # acepte correctamente en peticiones posteriores.
         self._session = data.get("session", "")
         logger.info("MyfxbookClient: sesión obtenida correctamente.")
         return True
@@ -118,11 +122,11 @@ class MyfxbookClient:
 
         for attempt in range(2):   # un reintento si la sesión expiró
             try:
-                response = requests.get(
-                    self.OUTLOOK_URL,
-                    params={"session": unquote(self._session)},
-                    timeout=10,
-                )
+                # IMPORTANTE: pasar el session token como parte de la URL
+                # directamente (sin params=) para evitar que requests lo
+                # re-encodee y corrompa los caracteres especiales del token.
+                url = f"{self.OUTLOOK_URL}?session={self._session}"
+                response = requests.get(url, timeout=10)
                 data = response.json()
             except Exception as exc:
                 logger.error("MyfxbookClient: error HTTP al obtener outlook: %s", exc)
