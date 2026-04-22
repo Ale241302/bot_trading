@@ -19,7 +19,29 @@ class MT5Connector:
         self.password = os.getenv("MT5_PASSWORD")
         self.server   = os.getenv("MT5_SERVER")
 
+    def is_connected(self) -> bool:
+        """Verifica si el terminal MT5 está inicializado y conectado."""
+        terminal_info = mt5.terminal_info()
+        if terminal_info is None:
+            return False
+        
+        # También verificamos si la cuenta está conectada
+        account_info = mt5.account_info()
+        if account_info is None:
+            return False
+            
+        return True
+
     def connect(self) -> bool:
+        """
+        Asegura la conexión con MT5. Si ya está conectado, solo verifica.
+        Si no, inicializa y hace login.
+        """
+        # Si ya parece estar conectado, intentamos un ping rápido
+        if self.is_connected():
+            return True
+
+        # Si no, intentamos (re)inicializar
         if not mt5.initialize():
             print(f"Error MT5 initialize(): {mt5.last_error()}")
             return False
@@ -27,12 +49,15 @@ class MT5Connector:
         authorized = mt5.login(self.login, password=self.password, server=self.server)
         if not authorized:
             print(f"Login fallido: {mt5.last_error()}")
-            mt5.shutdown()
+            # No apagamos aquí forzosamente para permitir reintentos posteriores
             return False
 
         info = mt5.account_info()
-        print(f"MT5 conectado | Cuenta: {info.login} | Balance: {info.balance} {info.currency}")
-        return True
+        if info:
+            print(f"✅ MT5 conectado | Cuenta: {info.login} | {info.server}")
+            return True
+        
+        return False
 
     def disconnect(self):
         mt5.shutdown()
@@ -51,6 +76,18 @@ class MT5Connector:
         df = pd.DataFrame(rates)
         df["time"] = pd.to_datetime(df["time"], unit="s")
         return df[["time", "open", "high", "low", "close", "tick_volume"]]
+
+    def get_account_info(self):
+        """Retorna información de la cuenta. Reconecta si es necesario."""
+        if not self.is_connected():
+            self.connect()
+        return mt5.account_info()
+
+    def get_terminal_info(self):
+        """Retorna información del terminal. Reconecta si es necesario."""
+        if not self.is_connected():
+            self.connect()
+        return mt5.terminal_info()
 
     def get_open_positions(self, symbol: str = None):
         """Retorna lista de posiciones abiertas (ejecutadas)."""

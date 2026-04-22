@@ -155,8 +155,8 @@ class MyfxbookClient:
             for entry in symbols_list:
                 name = entry.get("name", "").upper()
                 if name == normalized or name.replace("/", "") == normalized.replace("/", ""):
-                    long_pct  = float(entry.get("longsPercentage",  0))
-                    short_pct = float(entry.get("shortsPercentage", 0))
+                    long_pct  = float(entry.get("longPercentage",  0))
+                    short_pct = float(entry.get("shortPercentage", 0))
                     logger.info(
                         "MyfxbookClient: %s -> %.1f%% long / %.1f%% short",
                         symbol, long_pct, short_pct,

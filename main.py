@@ -49,9 +49,13 @@ def run_bot():
     if is_friday and now_utc.hour >= 14:
         print(f"   ⏳ Ventana viernes: {17 - now_utc.hour}h {60 - now_utc.minute}min para cierre total.")
     print("⏳ Analizando mercado...")
-    # ─────────────────────────────────────────────────────
+    # ── ASEGURAR CONEXIÓN CON MT5 ────────────────────────────────────
+    if not mt5.connect():
+        print("❌ Error de reconexión con MT5. Saltando este ciclo.")
+        return
+    # ─────────────────────────────────────────────────────────────────
 
-    acc_info = mt5_api.account_info()
+    acc_info = mt5.get_account_info()
     if not acc_info:
         print("❌ No se pudo obtener información de la cuenta MT5.")
         return
