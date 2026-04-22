@@ -7,13 +7,18 @@ Cambios v4 (2026-04-22):
 - FIX #1: simulate_sentiment() reemplazado por sentiment_for_backtest().
   El sentimiento ya NO es completamente aleatorio. Se usa una distribucion
   basada en el sesgo historico real del EURUSD retail (60-65% long),
-  con variacion ±10% por vela para simular cambios intraday.
+  con variacion +-10% por vela para simular cambios intraday.
 - FIX #4: Filtro de horario Colombia aplicado al backtest (7:00-16:00 UTC).
   El bot real no opera fuera de ese rango; el backtest tampoco debe.
 - FIX #5: MAX_CONSECUTIVE_SL=3 — circuit breaker igual al CapitalGuard real.
   Si hay 3 SL consecutivos, pausa operaciones hasta el dia siguiente.
   Elimina rachas destructoras (ej: 5-6 SL seguidos de Apr 14-21).
   El contador se resetea al inicio de cada dia o cuando entra un TP.
+- FIX #7: H1_LOOKBACK=100 y H4_LOOKBACK=100 — lookback FIJO e independiente
+  del M15 lookback. Con H1/H4 de 2 anios, usar iloc[-60] tomaba velas de
+  2024-2025 para calcular la SMA50, distorsionando la tendencia actual.
+  100 velas H1 = ~4 dias de contexto reciente; 100 velas H4 = ~17 dias.
+  Ambos cubren exactamente la SMA50 + margen sin incluir historia vieja.
 """
 import numpy as np
 import pandas as pd
@@ -38,6 +43,15 @@ TRADE_HOUR_START_UTC = 7    # 02:00 AM Colombia (UTC-5)
 TRADE_HOUR_END_UTC   = 16   # 11:00 AM Colombia (UTC-5)
 
 NEWS_PROB = 0.008
+
+# FIX #7: Lookback FIJO para H1 y H4, independiente del M15 lookback.
+# SMA50 necesita exactamente 50 velas; damos 100 para tener margen.
+# H1: 100 velas = ~4 dias de precios recientes.
+# H4: 100 velas = ~17 dias de precios recientes.
+# NUNCA usar iloc[-lookback_m15] para H1/H4 — con datos de 2 anios
+# eso incluiria precios de 2024 que distorsionan la SMA50 actual.
+H1_LOOKBACK = 100
+H4_LOOKBACK = 100
 
 
 def _get_phase(capital: float, capital_week_start: float, pnl_day: float) -> str:
@@ -67,12 +81,12 @@ def sentiment_for_backtest(rng: np.random.Generator, base_long_pct: float = 62.0
 
     En lugar de generar valores completamente aleatorios, usa como base
     el sesgo historico real del retail en EURUSD (~60-65% long) con una
-    variacion gaussiana ±10% por vela para simular fluctuaciones intraday.
+    variacion gaussiana +-10% por vela para simular fluctuaciones intraday.
 
     base_long_pct: Porcentaje base de retail long (default 62% = promedio historico EURUSD).
     """
-    noise    = rng.normal(0, 10)
-    long_pct = float(np.clip(base_long_pct + noise, 30, 85))
+    noise     = rng.normal(0, 10)
+    long_pct  = float(np.clip(base_long_pct + noise, 30, 85))
     short_pct = 100.0 - long_pct
     return {"short_pct": round(short_pct, 1), "long_pct": round(long_pct, 1)}
 
@@ -88,10 +102,12 @@ def run_backtest(
     Para cada vela evalua la confluencia y simula el trade.
     Retorna DataFrame con todas las operaciones ejecutadas.
 
-    v4:
+    v4 + FIX #7:
     - Sentimiento basado en sesgo historico real EURUSD (FIX #1).
     - Horario Colombia 7:00-16:00 UTC aplicado (FIX #4).
     - Circuit breaker MAX_CONSECUTIVE_SL=3 (FIX #5).
+    - H1/H4 usan lookback fijo (H1_LOOKBACK=100, H4_LOOKBACK=100) para
+      que la SMA50 calcule siempre sobre precios recientes (FIX #7).
     """
     rng = np.random.default_rng(seed)
     m15_full = frames["M15"]
@@ -102,14 +118,14 @@ def run_backtest(
     capital_week_start = initial_capital
     trades             = []
 
-    pnl_day           = 0.0
-    trades_today      = 0
-    last_date         = None
-    last_week         = None
+    pnl_day      = 0.0
+    trades_today = 0
+    last_date    = None
+    last_week    = None
 
     # FIX #5: contador de SL consecutivos
-    consecutive_sl        = 0
-    sl_pause_until_date   = None   # fecha hasta la que se pausa (None = sin pausa)
+    consecutive_sl      = 0
+    sl_pause_until_date = None   # fecha hasta la que se pausa (None = sin pausa)
 
     active_exit_times = []
 
@@ -121,13 +137,17 @@ def run_backtest(
           f"max {MAX_TRADES_SIMULTANEOUS['CRECIMIENTO']} simultaneo")
     print(f"[Backtest] Horario Colombia: {TRADE_HOUR_START_UTC}:00 - {TRADE_HOUR_END_UTC}:00 UTC")
     print(f"[Backtest] Circuit breaker: pausa tras {MAX_CONSECUTIVE_SL} SL consecutivos")
+    print(f"[Backtest] FIX #7: H1 lookback={H1_LOOKBACK} velas, H4 lookback={H4_LOOKBACK} velas")
 
     for i in tqdm(range(start_idx, len(m15_full)), desc="Simulando velas"):
         ts    = m15_full.index[i]
         m15_w = m15_full.iloc[i - lookback: i + 1].copy()
 
-        h1_w = h1_full[h1_full.index <= ts].iloc[-lookback:].copy()
-        h4_w = h4_full[h4_full.index <= ts].iloc[-lookback:].copy()
+        # FIX #7: lookback FIJO para H1 y H4 — no usar el lookback de M15.
+        # Con H1/H4 de 2 anios, iloc[-60] tomaria velas de 2024 que
+        # distorsionan la SMA50 respecto al contexto actual del mercado.
+        h1_w = h1_full[h1_full.index <= ts].iloc[-H1_LOOKBACK:].copy()
+        h4_w = h4_full[h4_full.index <= ts].iloc[-H4_LOOKBACK:].copy()
 
         if len(h1_w) < 10 or len(h4_w) < 5:
             continue
@@ -137,11 +157,11 @@ def run_backtest(
         current_week = ts.isocalendar()[:2]
 
         if last_date != current_date:
-            pnl_day           = 0.0
-            trades_today      = 0
-            last_date         = current_date
+            pnl_day             = 0.0
+            trades_today        = 0
+            last_date           = current_date
             # FIX #5: el circuit breaker se resetea al inicio de cada nuevo dia
-            consecutive_sl    = 0
+            consecutive_sl      = 0
             sl_pause_until_date = None
 
         if last_week != current_week:
@@ -242,20 +262,18 @@ def run_backtest(
         else:
             pips_result = (entry_price - exit_price) / PIP_SIZE
 
-        pnl_usd = _pip_to_usd(pips_result, lot)
-        capital += pnl_usd
-        pnl_day += pnl_usd
+        pnl_usd  = _pip_to_usd(pips_result, lot)
+        capital  += pnl_usd
+        pnl_day  += pnl_usd
 
         # FIX #5: actualizar contador de SL consecutivos
         if outcome == "SL":
             consecutive_sl += 1
             if consecutive_sl >= MAX_CONSECUTIVE_SL:
-                # Pausa el resto del dia actual
                 sl_pause_until_date = current_date
                 print(f"[Backtest] Circuit breaker activado en {ts.date()} "
                       f"tras {consecutive_sl} SL consecutivos — pausando dia")
         else:
-            # TP o TIMEOUT resetea el contador
             consecutive_sl = 0
 
         exit_timestamp = m15_full.index[exit_idx]
