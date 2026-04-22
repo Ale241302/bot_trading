@@ -2,19 +2,58 @@
 signal_engine.py
 Replica determinista del arbol de 4 niveles del prompt.md WDC Hibrida v2.0.
 
-Cambios v4 (2026-04-22):
-- FIX #2: get_trend() umbral aumentado de 0.03% a 0.10% para EURUSD.
-  Con 0.03% el filtro no filtraba nada; 0.10% es mas significativo.
-- FIX #3: Pin Bar relajada — mecha >= 55% (era 60%), cuerpo <= 35% (era 30%),
-  mecha contraria <= 25% (era 20%). Mas senales sin perder calidad.
-- FIX #3b: Envolvente relajada — permite que curr_o este dentro del cuerpo
-  anterior en lugar de exigir toque exacto (curr_o <= prev_c).
-- REVERT FIX #6: Weekly Trend Lock eliminado — empeoro WR y DD con periodo
-  de datos corto (~2 meses). Requiere minimo 6 meses de historia para calibrar.
+Cambios v5 (2026-04-22):
+- PER-PAIR CALIBRATION: evaluate_confluence() acepta `symbol` para aplicar
+  parametros distintos segun el par:
+    EURUSD: threshold=0.0010, sl=8p,  tp=16p, sentiment_bias=long  (60% long historico)
+    GBPUSD: threshold=0.0012, sl=15p, tp=30p, sentiment_bias=long  (55% long historico)
+    USDJPY: threshold=0.0015, sl=15p, tp=30p, sentiment_bias=short (55% short historico)
+- simulate_sentiment() acepta `symbol` para usar la distribucion correcta por par.
+- get_trend() threshold ya era configurable; ahora backtest_runner lo pasa por par.
+- SL/TP se retornan en el reason string para que backtest_runner los use.
 """
 import numpy as np
 import pandas as pd
 from typing import Tuple
+
+
+# —————————————————————————————————————————————
+# CONFIGURACION POR PAR
+# —————————————————————————————————————————————
+
+PAIR_CONFIG = {
+    "EURUSD": {
+        "trend_threshold": 0.0010,
+        "sl_pips": 8,
+        "tp_pips": 16,
+        # Retail historicamente 60-65% long en EURUSD
+        "sentiment_mean": 62.0,
+        "sentiment_std": 12.0,
+    },
+    "GBPUSD": {
+        "trend_threshold": 0.0012,
+        "sl_pips": 15,
+        "tp_pips": 30,
+        # Retail historicamente 55-60% long en GBPUSD
+        "sentiment_mean": 57.0,
+        "sentiment_std": 13.0,
+    },
+    "USDJPY": {
+        "trend_threshold": 0.0015,
+        "sl_pips": 15,
+        "tp_pips": 30,
+        # Retail historicamente 55% short en USDJPY (buscan safe-haven)
+        "sentiment_mean": 43.0,   # long_pct bajo = short dominante
+        "sentiment_std": 13.0,
+    },
+}
+
+# Fallback si llega un par no registrado
+_DEFAULT_CONFIG = PAIR_CONFIG["EURUSD"]
+
+
+def get_pair_config(symbol: str) -> dict:
+    return PAIR_CONFIG.get(symbol, _DEFAULT_CONFIG)
 
 
 # —————————————————————————————————————————————
@@ -30,9 +69,10 @@ def _sma(series: pd.Series, period: int) -> float:
 def get_trend(df: pd.DataFrame, sma_period: int = 50, threshold: float = 0.0010) -> str:
     """
     Tendencia basada en SMA50.
-    v5: threshold configurable por par (EURUSD/GBPUSD=0.0010, USDJPY=0.0015).
-    BUY  -> precio > threshold por encima de SMA50
-    SELL -> precio > threshold por debajo de SMA50
+    threshold configurable por par:
+      EURUSD=0.0010, GBPUSD=0.0012, USDJPY=0.0015
+    BUY    -> precio > threshold% por encima de SMA50
+    SELL   -> precio > threshold% por debajo de SMA50
     NEUTRAL -> dentro del margen
     """
     if len(df) < sma_period:
@@ -56,11 +96,10 @@ def get_trend(df: pd.DataFrame, sma_period: int = 50, threshold: float = 0.0010)
 
 def _is_pin_bar_bullish(o: float, h: float, l: float, c: float) -> bool:
     """
-    FIX v4: criterios relajados para capturar mas senales validas.
-    Mecha inferior >= 55% del rango (era 60%)
-    Cuerpo <= 35% del rango (era 30%)
-    Mecha superior <= 25% del rango (era 20%)
-    Cierre en 55% superior (era 60%)
+    Mecha inferior >= 55% del rango
+    Cuerpo <= 35% del rango
+    Mecha superior <= 25% del rango
+    Cierre en 55% superior
     """
     total = h - l
     if total == 0:
@@ -78,11 +117,10 @@ def _is_pin_bar_bullish(o: float, h: float, l: float, c: float) -> bool:
 
 def _is_pin_bar_bearish(o: float, h: float, l: float, c: float) -> bool:
     """
-    FIX v4: criterios relajados para capturar mas senales validas.
-    Mecha superior >= 55% del rango (era 60%)
-    Cuerpo <= 35% del rango (era 30%)
-    Mecha inferior <= 25% del rango (era 20%)
-    Cierre en 55% inferior (era 60%)
+    Mecha superior >= 55% del rango
+    Cuerpo <= 35% del rango
+    Mecha inferior <= 25% del rango
+    Cierre en 55% inferior
     """
     total = h - l
     if total == 0:
@@ -100,8 +138,8 @@ def _is_pin_bar_bearish(o: float, h: float, l: float, c: float) -> bool:
 
 def _is_engulfing_bullish(prev_o, prev_c, curr_o, curr_c) -> bool:
     """
-    FIX v4: permite que curr_o este dentro del cuerpo bajista anterior.
-    La vela actual debe ser alcista y engullir el cuerpo previo bajista.
+    Vela alcista que engulla el cuerpo bajista previo.
+    curr_o puede estar dentro del cuerpo anterior (relajado v4).
     """
     return (
         prev_c < prev_o
@@ -113,8 +151,8 @@ def _is_engulfing_bullish(prev_o, prev_c, curr_o, curr_c) -> bool:
 
 def _is_engulfing_bearish(prev_o, prev_c, curr_o, curr_c) -> bool:
     """
-    FIX v4: permite que curr_o este dentro del cuerpo alcista anterior.
-    La vela actual debe ser bajista y engullir el cuerpo previo alcista.
+    Vela bajista que engulla el cuerpo alcista previo.
+    curr_o puede estar dentro del cuerpo anterior (relajado v4).
     """
     return (
         prev_c > prev_o
@@ -125,10 +163,6 @@ def _is_engulfing_bearish(prev_o, prev_c, curr_o, curr_c) -> bool:
 
 
 def detect_pattern(m15: pd.DataFrame, bias: str) -> str | None:
-    """
-    Acepta PinBar y Envolvente confirmados.
-    v4: criterios mas realistas sin perder logica de confluencia.
-    """
     if len(m15) < 3:
         return None
     last = m15.iloc[-1]
@@ -153,13 +187,15 @@ def detect_pattern(m15: pd.DataFrame, bias: str) -> str | None:
 # SIMULACION DE INPUTS EXTERNOS
 # —————————————————————————————————————————————
 
-def simulate_sentiment(rng: np.random.Generator) -> dict:
+def simulate_sentiment(rng: np.random.Generator, symbol: str = "EURUSD") -> dict:
     """
-    Distribucion mas realista para EURUSD:
-    El retail tiende a estar 55-65% long en EURUSD historicamente.
-    Se usa desviacion 12 (era 15) para evitar extremos irreales.
+    Distribucion de sentimiento calibrada por par.
+    EURUSD: media=62% long (retail historicamente long en EUR)
+    GBPUSD: media=57% long (similar al EUR pero menos extremo)
+    USDJPY: media=43% long (retail busca safe-haven = mas short)
     """
-    long_pct = float(np.clip(rng.normal(60, 12), 35, 85))
+    cfg = get_pair_config(symbol)
+    long_pct = float(np.clip(rng.normal(cfg["sentiment_mean"], cfg["sentiment_std"]), 30, 85))
     short_pct = 100.0 - long_pct
     return {"short_pct": short_pct, "long_pct": long_pct}
 
@@ -169,7 +205,7 @@ def simulate_av_score(rng: np.random.Generator) -> float:
 
 
 # —————————————————————————————————————————————
-# MOTOR DE CONFLUENCIA PRINCIPAL v4
+# MOTOR DE CONFLUENCIA PRINCIPAL v5
 # —————————————————————————————————————————————
 
 def evaluate_confluence(
@@ -180,18 +216,27 @@ def evaluate_confluence(
     av_score: float,
     news_block: bool,
     trend_threshold: float = 0.0010,
+    symbol: str = "EURUSD",
 ) -> Tuple[str, str, dict]:
     """
     Arbol WDC Hibrida v2.0 — 4 niveles estrictos.
+    v5: calibracion por par via `symbol`.
 
     N1: Noticias HIGH -> HOLD
     N2: Tendencia Macro H4 + H1 -> define bias (BUY/SELL) o HOLD si conflicto
     N3: Sentimiento confirma tendencia:
         - bias=SELL: long_pct > 60% requerido (masa atrapada comprando)
         - bias=BUY:  short_pct > 60% requerido (masa atrapada vendiendo)
-        - Neutro (40-60%): avanza solo si la tendencia es clara y unanime
+        - Neutro (40-60%): avanza solo si H4+H1 unanimes
     N4: Patron de vela confirmado (PinBar o Envolvente)
+
+    Retorna (action, reason, levels).
+    El reason incluye SL/TP del par para que backtest_runner los use.
     """
+    cfg = get_pair_config(symbol)
+    sl = cfg["sl_pips"]
+    tp = cfg["tp_pips"]
+
     levels = {
         "nivel_1_noticias": "",
         "nivel_2_sentimiento": "",
@@ -294,6 +339,6 @@ def evaluate_confluence(
         f"N2 {levels['nivel_2_sentimiento']}. "
         f"N3 {levels['nivel_3_tendencia']}. "
         f"N4 OK: {pattern}. "
-        f"→ {bias} | SL=8p TP=16p"
+        f"→ {bias} | SL={sl}p TP={tp}p"
     )
     return bias, reason, levels
