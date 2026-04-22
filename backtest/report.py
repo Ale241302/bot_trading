@@ -198,6 +198,8 @@ def _compute_wdc_verdict(metrics: dict, stats: dict) -> tuple[str, str, str]:
 
 def _fig_equity_curve(trades_df: pd.DataFrame, initial_capital: float) -> go.Figure:
     equity = initial_capital + trades_df["pnl_usd"].cumsum()
+    has_symbol = "symbol" in trades_df.columns
+    pairs_label = ", ".join(trades_df["symbol"].unique()) if has_symbol else "EURUSD"
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=list(range(len(equity))),
@@ -210,7 +212,7 @@ def _fig_equity_curve(trades_df: pd.DataFrame, initial_capital: float) -> go.Fig
     fig.add_hline(y=initial_capital, line_dash="dash", line_color="gray",
                   annotation_text=f"Inicio ${initial_capital}")
     fig.update_layout(
-        title="Curva de Equity — Backtest EURUSD M15",
+        title=f"Curva de Equity — Backtest {pairs_label} M15",
         xaxis_title="# Trade",
         yaxis_title="Capital (USD)",
         template="plotly_dark",
@@ -334,6 +336,37 @@ def _fig_phase_distribution(trades_df: pd.DataFrame) -> go.Figure:
         title="PnL por Fase de Capital",
         xaxis_title="Fase",
         yaxis_title="PnL Total USD",
+        template="plotly_dark",
+        height=380,
+    )
+    return fig
+
+
+def _fig_pnl_by_pair(trades_df: pd.DataFrame) -> go.Figure:
+    """PnL total y Win Rate por par (solo si hay columna symbol)."""
+    if "symbol" not in trades_df.columns:
+        return go.Figure()
+    df = trades_df.copy()
+    pair_stats = df.groupby("symbol").agg(
+        pnl_total=("pnl_usd", "sum"),
+        trades=("pnl_usd", "count"),
+        wins=("pnl_usd", lambda x: (x > 0).sum()),
+    ).reset_index()
+    pair_stats["wr"] = (pair_stats["wins"] / pair_stats["trades"] * 100).round(1)
+    color_map = {"EURUSD": "#3b82f6", "GBPUSD": "#f59e0b", "USDJPY": "#8b5cf6"}
+    colors = [color_map.get(s, "#6b7280") for s in pair_stats["symbol"]]
+    fig = go.Figure(go.Bar(
+        x=pair_stats["symbol"],
+        y=pair_stats["pnl_total"],
+        text=[f"{t} trades | WR {wr}%" for t, wr in zip(pair_stats["trades"], pair_stats["wr"])],
+        textposition="auto",
+        marker_color=colors,
+        hovertemplate="%{x}<br>PnL: $%{y:.2f}<extra></extra>",
+    ))
+    fig.update_layout(
+        title="PnL Total por Par",
+        xaxis_title="Par",
+        yaxis_title="PnL USD",
         template="plotly_dark",
         height=380,
     )
@@ -503,10 +536,15 @@ def _build_trades_table(trades_df: pd.DataFrame) -> str:
 
         detail_id = f"detail_{idx}"
 
+        sym_name  = row.get("symbol", "EURUSD")
+        sym_color_map = {"EURUSD": "#3b82f6", "GBPUSD": "#f59e0b", "USDJPY": "#8b5cf6"}
+        sym_color = sym_color_map.get(sym_name, "#94a3b8")
+
         rows.append(f"""
         <tr onclick="toggleDetail('{detail_id}')" style="cursor:pointer" class="trade-row">
           <td style="color:#94a3b8;font-size:0.8rem">{idx}</td>
           <td style="font-size:0.82rem;color:#e2e8f0">{entry_str}</td>
+          <td><span class="badge" style="background:{sym_color}20;color:{sym_color};border:1px solid {sym_color}40;font-size:0.72rem">{sym_name}</span></td>
           <td><span class="badge" style="background:{action_color}20;color:{action_color};border:1px solid {action_color}40">{action}</span></td>
           <td><span class="badge" style="background:{phase_color}20;color:{phase_color};border:1px solid {phase_color}40;font-size:0.72rem">{phase}</span></td>
           <td style="text-align:right;font-variant-numeric:tabular-nums">{lot:.2f}</td>
@@ -519,7 +557,7 @@ def _build_trades_table(trades_df: pd.DataFrame) -> str:
           <td style="color:#94a3b8;font-size:0.8rem">▼</td>
         </tr>
         <tr id="{detail_id}" class="detail-row" style="display:none">
-          <td colspan="12">
+          <td colspan="13">
             <div class="detail-box">
               <div class="detail-grid">
                 <div class="detail-section">
@@ -532,7 +570,7 @@ def _build_trades_table(trades_df: pd.DataFrame) -> str:
                 </div>
                 <div class="detail-section">
                   <div class="detail-title">📊 Ejecucion del Trade</div>
-                  <div class="criteria-row"><span class="crit-label">Direccion:</span> <span style="color:{action_color};font-weight:600">{action} EURUSD</span></div>
+                  <div class="criteria-row"><span class="crit-label">Direccion:</span> <span style="color:{action_color};font-weight:600">{action} {sym_name}</span></div>
                   <div class="criteria-row"><span class="crit-label">Entrada:</span> <span>{entry_p:.5f}</span></div>
                   <div class="criteria-row"><span class="crit-label">Salida:</span> <span>{exit_p:.5f}</span></div>
                   <div class="criteria-row"><span class="crit-label">Resultado:</span> <span style="color:{outcome_color};font-weight:600">{outcome} ({pips:+.1f} pips)</span></div>
@@ -554,6 +592,7 @@ def _build_trades_table(trades_df: pd.DataFrame) -> str:
           <tr>
             <th>#</th>
             <th>Fecha/Hora</th>
+            <th>Par</th>
             <th>Tipo</th>
             <th>Fase</th>
             <th style="text-align:right">Lote</th>
@@ -658,6 +697,7 @@ def generate_report(
     fig_monthly   = _fig_monthly_pnl(trades_df)
     fig_weekly    = _fig_weekly_pnl(trades_df)
     fig_phase     = _fig_phase_distribution(trades_df)
+    fig_pair      = _fig_pnl_by_pair(trades_df)
     fig_mc        = _fig_monte_carlo(mc_results)
     fig_mc_final  = _fig_mc_final_distribution(mc_results)
     fig_mc_dd     = _fig_mc_drawdown_distribution(mc_results)
@@ -707,12 +747,15 @@ def generate_report(
     trades_table_html = _build_trades_table(trades_df)
     projections_html  = _build_projections_table(proj, initial_capital)
 
+    has_symbol = "symbol" in trades_df.columns
+    pairs_label = ", ".join(trades_df["symbol"].unique()) if has_symbol else "EURUSD"
+
     html = f"""<!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Backtest + Monte Carlo — WDC Bot EURUSD</title>
+  <title>Backtest + Monte Carlo — WDC Bot {pairs_label}</title>
   <script src="https://cdn.plot.ly/plotly-2.29.1.min.js"></script>
   <style>
     :root {{
@@ -784,7 +827,7 @@ def generate_report(
 </head>
 <body>
   <h1>&#x1F4CA; Backtest + Monte Carlo</h1>
-  <p class="subtitle">WDC Confluence Strategy &middot; EURUSD M15/H1/H4 &middot; Generado: {ts}</p>
+  <p class="subtitle">WDC Confluence Strategy &middot; {pairs_label} M15/H1/H4 &middot; Generado: {ts}</p>
 
   <!-- VEREDICTO WDC -->
   <div class="verdict-box" style="border-color:{wdc_verdict[1]}; background:{wdc_verdict[1]}18">
@@ -861,6 +904,10 @@ def generate_report(
     <div class="card">{to_div(fig_phase)}</div>
   </div>
 
+  <!-- PnL POR PAR -->
+  {f'<h2>&#x1F4B1; Rendimiento por Par</h2>' if has_symbol else ''}
+  {f'<div class="card">{to_div(fig_pair)}</div>' if has_symbol else ''}
+
   <!-- PnL TEMPORAL -->
   <h2>&#x1F4C5; PnL por Periodo</h2>
   <div class="grid-2">
@@ -899,7 +946,7 @@ def generate_report(
   </div>
 
   <p style="color:var(--muted);font-size:0.78rem;margin-top:32px;text-align:center">
-    bot_trading &middot; WDC Confluence Strategy &middot; EURUSD M15/H1/H4 &middot; {ts}
+    bot_trading &middot; WDC Confluence Strategy &middot; {pairs_label} M15/H1/H4 &middot; {ts}
   </p>
 
   <script>
@@ -923,5 +970,5 @@ def generate_report(
     with open(html_path, "w", encoding="utf-8") as f:
         f.write(html)
 
-    print(f"[Report] Reporte HTML v3 generado: {html_path}")
+    print(f"[Report] Reporte HTML v5 multi-par generado: {html_path}")
     return html_path

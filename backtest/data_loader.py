@@ -1,7 +1,13 @@
 """
 data_loader.py
-Descarga datos historicos OHLCV de EURUSD en M15, H1 y H4
+Descarga datos historicos OHLCV de multiples pares en M15, H1 y H4
 usando yfinance. Devuelve DataFrames sincronizados por timestamp UTC.
+
+v5 (2026-04-22) — Multi-par:
+  - download_data() ahora acepta lista de simbolos y descarga para cada uno.
+  - Retorna dict[str, dict[str, pd.DataFrame]]:
+    {"EURUSD": {"M15": df, "H1": df, "H4": df}, "GBPUSD": {...}, ...}
+  - Retrocompatible: si se pasa un solo simbolo, funciona igual.
 
 Limites reales de yfinance por intervalo:
   - 15m : max 60 dias por request  -> se descarga en chunks de 55 dias
@@ -13,9 +19,9 @@ import pandas as pd
 from datetime import datetime, timedelta
 import logging
 
-logger = logging.getLogger(__name__)
+from .pair_config import PAIR_SPECS, DEFAULT_PAIRS
 
-SYMBOL = "EURUSD=X"
+logger = logging.getLogger(__name__)
 
 # Limites duros de yfinance para datos intraday
 _MAX_DAYS = {
@@ -28,80 +34,100 @@ _CHUNK_DAYS = {
 }
 
 
-def download_data(years: int = 2) -> dict[str, pd.DataFrame]:
+def download_data(
+    years: int = 2,
+    symbols: list[str] | None = None,
+) -> dict[str, dict[str, pd.DataFrame]]:
     """
-    Descarga EURUSD para M15, H1 y H4 por los ultimos `years` anios.
+    Descarga datos para cada simbolo en `symbols` (default: DEFAULT_PAIRS).
+    Para cada uno descarga M15, H1 y H4.
 
-    - H1 y H4: una sola llamada, hasta 729 dias (respeta el limite de yfinance).
-    - M15: descarga en chunks de 55 dias y concatena (limite de 60 dias/request).
-
-    Retorna dict con keys 'M15', 'H1', 'H4'.
+    Retorna dict anidado:
+      { "EURUSD": {"M15": df, "H1": df, "H4": df},
+        "GBPUSD": {"M15": df, "H1": df, "H4": df},
+        "USDJPY": {"M15": df, "H1": df, "H4": df} }
     """
+    if symbols is None:
+        symbols = DEFAULT_PAIRS
+
     end = datetime.utcnow()
-    requested_days = min(years * 365, 729)  # nunca pedir mas de 729 dias
+    requested_days = min(years * 365, 729)
 
-    frames = {}
+    all_frames = {}
 
-    # ── H1 y H4: una sola llamada con el maximo disponible ──────────────────
-    for tf, interval in [("H1", "1h"), ("H4", "4h")]:
-        days = min(requested_days, _MAX_DAYS[interval])
-        start = end - timedelta(days=days)
-        logger.info(
-            f"Descargando {tf} ({interval}) desde {start.date()} hasta {end.date()}"
-        )
-        df = yf.download(
-            SYMBOL,
-            start=start.strftime("%Y-%m-%d"),
-            end=end.strftime("%Y-%m-%d"),
-            interval=interval,
-            auto_adjust=True,
-            progress=False,
-        )
-        if not df.empty:
-            df = _clean(df)
+    for symbol in symbols:
+        spec = PAIR_SPECS.get(symbol)
+        if spec is None:
+            logger.warning(f"Simbolo {symbol} no tiene spec en PAIR_SPECS, saltando.")
+            continue
+
+        yf_ticker = spec["yf_symbol"]
+        logger.info(f"── Descargando {symbol} ({yf_ticker}) ──")
+
+        frames = {}
+
+        # ── H1 y H4: una sola llamada ──────────────────────────────────
+        for tf, interval in [("H1", "1h"), ("H4", "4h")]:
+            days = min(requested_days, _MAX_DAYS[interval])
+            start = end - timedelta(days=days)
+            logger.info(
+                f"  {symbol} {tf} ({interval}) desde {start.date()} hasta {end.date()}"
+            )
+            df = yf.download(
+                yf_ticker,
+                start=start.strftime("%Y-%m-%d"),
+                end=end.strftime("%Y-%m-%d"),
+                interval=interval,
+                auto_adjust=True,
+                progress=False,
+            )
+            if not df.empty:
+                df = _clean(df)
+            else:
+                df = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+            frames[tf] = df
+            logger.info(f"    {tf}: {len(df)} velas descargadas")
+
+        # ── M15: chunks de 55 dias ─────────────────────────────────────
+        logger.info(f"  {symbol} M15 (chunks de 55 dias)...")
+        chunk_size = _CHUNK_DAYS["15m"]
+        m15_days = min(requested_days, _MAX_DAYS["15m"])
+        chunks = []
+        chunk_end = end
+        days_covered = 0
+
+        while days_covered < m15_days:
+            remaining = m15_days - days_covered
+            this_chunk = min(chunk_size, remaining)
+            chunk_start = chunk_end - timedelta(days=this_chunk)
+
+            df_chunk = yf.download(
+                yf_ticker,
+                start=chunk_start.strftime("%Y-%m-%d"),
+                end=chunk_end.strftime("%Y-%m-%d"),
+                interval="15m",
+                auto_adjust=True,
+                progress=False,
+            )
+            if not df_chunk.empty:
+                chunks.append(_clean(df_chunk))
+
+            days_covered += this_chunk
+            chunk_end = chunk_start
+
+        if chunks:
+            m15 = pd.concat(chunks)
+            m15 = m15[~m15.index.duplicated(keep="last")]
+            m15.sort_index(inplace=True)
         else:
-            df = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
-        frames[tf] = df
-        logger.info(f"  {tf}: {len(df)} velas descargadas")
+            m15 = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
 
-    # ── M15: chunks de 55 dias hasta cubrir `requested_days` ────────────────
-    logger.info("Descargando M15 (chunks de 55 dias)...")
-    chunk_size = _CHUNK_DAYS["15m"]
-    m15_days = min(requested_days, _MAX_DAYS["15m"])  # yfinance hard-limit
-    chunks = []
-    chunk_end = end
-    days_covered = 0
+        frames["M15"] = m15
+        logger.info(f"    M15: {len(m15)} velas descargadas ({m15_days} dias)")
 
-    while days_covered < m15_days:
-        remaining = m15_days - days_covered
-        this_chunk = min(chunk_size, remaining)
-        chunk_start = chunk_end - timedelta(days=this_chunk)
+        all_frames[symbol] = frames
 
-        df_chunk = yf.download(
-            SYMBOL,
-            start=chunk_start.strftime("%Y-%m-%d"),
-            end=chunk_end.strftime("%Y-%m-%d"),
-            interval="15m",
-            auto_adjust=True,
-            progress=False,
-        )
-        if not df_chunk.empty:
-            chunks.append(_clean(df_chunk))
-
-        days_covered += this_chunk
-        chunk_end = chunk_start  # mover ventana hacia atras
-
-    if chunks:
-        m15 = pd.concat(chunks)
-        m15 = m15[~m15.index.duplicated(keep="last")]
-        m15.sort_index(inplace=True)
-    else:
-        m15 = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
-
-    frames["M15"] = m15
-    logger.info(f"  M15: {len(m15)} velas descargadas ({m15_days} dias)")
-
-    return frames
+    return all_frames
 
 
 def _clean(df: pd.DataFrame) -> pd.DataFrame:

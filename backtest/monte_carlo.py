@@ -2,56 +2,26 @@
 monte_carlo.py
 Simula N escenarios bootstrap sobre el historial de trades.
 
-v3 — Rescalado de PnL al riesgo real del Camino A:
-  El backtest historico opera con lote 0.01 (~0.4% riesgo sobre $50).
-  En produccion el Camino A usa 25% de riesgo → factor de escala = 62.5x.
-  El MC recibe `risk_pct` y reescala cada PnL antes de simular, manteniendo
-  los resultados TP/SL del backtest pero con el tamano de lote real.
+v5 — Multi-par:
+  Ahora los trades pueden venir de pares con diferentes SL/TP.
+  En modo compound, se recalcula el lote por trade usando el SL real
+  de cada trade (campo 'pips' del outcome).
+
+  En modo historico, se usa el PnL directo del backtest.
 
   Modos:
     risk_pct=None  → usa PnL tal como llegan del backtest (modo historico)
-    risk_pct=0.25  → reescala al 25% de riesgo real (Camino A)
-    risk_pct=0.10  → reescala al 10% (modo anterior)
+    risk_pct=0.05  → reescala al 5% de riesgo real (compounding dinamico)
 """
 import time
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
+from .pair_config import PAIR_SPECS
+
 WEEKLY_TARGET_MULT = 2.0    # objetivo: duplicar la cuenta
 RUIN_THRESHOLD     = 0.50   # drawdown >= 50% sobre capital pico = ruina
-
-# Parametros del backtest historico (lote fijo con el que se genero trades.csv)
-_BACKTEST_SL_PIPS   = 8.0
-_BACKTEST_LOT       = 0.01
-_PIP_VALUE_PER_LOT  = 10.0   # $10 por pip por lote estandar en EURUSD
-
-
-def _rescale_pnl(
-    pnl_array: np.ndarray,
-    initial_capital: float,
-    risk_pct: float,
-    sl_pips: float = _BACKTEST_SL_PIPS,
-    backtest_lot: float = _BACKTEST_LOT,
-    pip_value: float = _PIP_VALUE_PER_LOT,
-) -> np.ndarray:
-    """
-    Reescala los PnL del backtest (lote fijo) al riesgo % real del Camino A.
-
-    Formula:
-      riesgo_usd_real  = capital * risk_pct
-      lote_real        = riesgo_usd_real / (sl_pips * pip_value)
-      factor           = lote_real / backtest_lot
-      pnl_reescalado   = pnl_original * factor
-
-    Nota: el factor se recalcula trade a trade usando el capital COMPUESTO,
-    lo que modela fielmente el compounding del Camino A.
-    Sin embargo para el array estatico usamos capital inicial como proxy
-    (el compounding real ocurre dentro del loop de simulacion).
-    """
-    lote_real = (initial_capital * risk_pct) / (sl_pips * pip_value)
-    factor    = lote_real / backtest_lot
-    return pnl_array * factor
 
 
 def run_monte_carlo(
@@ -59,13 +29,13 @@ def run_monte_carlo(
     initial_capital: float = 50.0,
     n_simulations: int = 1000,
     seed: int | None = None,
-    risk_pct: float | None = None,   # None = historico | 0.25 = Camino A
+    risk_pct: float | None = None,
 ) -> dict:
     """
     Corre `n_simulations` simulaciones bootstrap CON reemplazo.
 
-    Si `risk_pct` se especifica, los PnL se reescalan dinamicamente
-    en cada paso del compounding (lote crece con el capital).
+    Multi-par: cada trade tiene un SL y pip_value potencialmente diferente.
+    En modo compound, se recalcula el lote dinamicamente por trade.
 
     Retorna dict con equity_curves, final_capitals, max_drawdowns, stats.
     """
@@ -75,14 +45,33 @@ def run_monte_carlo(
     effective_seed = seed if seed is not None else int(time.time() * 1000) % (2**31)
     rng = np.random.default_rng(effective_seed)
 
-    # Array de resultados binarios: +1 (TP) o -1 (SL) segun signo del PnL
-    # Guardamos el ratio TP/SL para reescalar dinamicamente con compounding
-    outcomes   = np.sign(trades_df["pnl_usd"].values).astype(int)  # +1 o -1
+    # Preparar arrays de datos por trade
     pnl_raw    = trades_df["pnl_usd"].values.copy()
+    outcomes   = np.sign(pnl_raw).astype(int)  # +1 o -1
     n_trades   = len(pnl_raw)
     final_target = initial_capital * WEEKLY_TARGET_MULT
 
-    # Modo: historico (pnl fijo) vs reescalado (compounding real)
+    # Para modo compound multi-par: necesitamos SL y pip_value por trade
+    # Extraer del campo 'symbol' si existe
+    has_symbol = "symbol" in trades_df.columns
+
+    if has_symbol:
+        symbols_arr = trades_df["symbol"].values
+        sl_pips_arr = np.array([
+            PAIR_SPECS.get(s, {}).get("sl_pips", 8.0) for s in symbols_arr
+        ])
+        tp_pips_arr = np.array([
+            PAIR_SPECS.get(s, {}).get("tp_pips", 16.0) for s in symbols_arr
+        ])
+        pip_value_arr = np.array([
+            PAIR_SPECS.get(s, {}).get("pip_value_per_lot", 10.0) for s in symbols_arr
+        ])
+    else:
+        # Retrocompatible: asumir EURUSD
+        sl_pips_arr   = np.full(n_trades, 8.0)
+        tp_pips_arr   = np.full(n_trades, 16.0)
+        pip_value_arr = np.full(n_trades, 10.0)
+
     use_compound = risk_pct is not None
     if use_compound:
         riesgo_modo = risk_pct
@@ -92,6 +81,9 @@ def run_monte_carlo(
         print(f"[Monte Carlo] Modo HISTORICO — PnL del backtest sin reescalar")
 
     print(f"[Monte Carlo] {n_simulations} sims | {n_trades} trades | seed={effective_seed} | capital=${initial_capital}")
+    if has_symbol:
+        unique_syms = trades_df["symbol"].unique()
+        print(f"[Monte Carlo] Pares: {', '.join(unique_syms)}")
 
     equity_curves  = np.zeros((n_simulations, n_trades + 1))
     final_capitals = np.zeros(n_simulations)
@@ -100,8 +92,8 @@ def run_monte_carlo(
     double_count   = 0
 
     for sim in tqdm(range(n_simulations), desc="Monte Carlo"):
-        # Bootstrap con reemplazo sobre los outcomes (+1/-1)
-        sampled_outcomes = rng.choice(outcomes, size=n_trades, replace=True)
+        # Bootstrap: indices aleatorios con reemplazo
+        sampled_indices = rng.integers(0, n_trades, size=n_trades)
 
         capital      = initial_capital
         equity       = [capital]
@@ -109,20 +101,23 @@ def run_monte_carlo(
         max_dd       = 0.0
         ruined       = False
 
-        for outcome in sampled_outcomes:
+        for idx in sampled_indices:
+            outcome   = outcomes[idx]
+            sl_pips   = sl_pips_arr[idx]
+            tp_pips   = tp_pips_arr[idx]
+            pip_value = pip_value_arr[idx]
+
             if use_compound:
-                # Lote dinamico: crece con el capital actual (compounding real)
-                lote_actual = (capital * riesgo_modo) / (_BACKTEST_SL_PIPS * _PIP_VALUE_PER_LOT)
-                lote_actual = max(0.01, lote_actual)   # minimo 0.01
+                # Lote dinamico: crece con el capital actual
+                lote_actual = (capital * riesgo_modo) / (sl_pips * pip_value)
+                lote_actual = max(0.01, lote_actual)
                 if outcome > 0:   # TP
-                    pnl = lote_actual * _BACKTEST_SL_PIPS * _PIP_VALUE_PER_LOT * 2  # RR 1:2
+                    pnl = lote_actual * tp_pips * pip_value
                 else:             # SL
-                    pnl = -lote_actual * _BACKTEST_SL_PIPS * _PIP_VALUE_PER_LOT
+                    pnl = -lote_actual * sl_pips * pip_value
             else:
-                # Modo historico: PnL fijo del backtest (promedio TP/SL)
-                avg_tp = pnl_raw[pnl_raw > 0].mean() if (pnl_raw > 0).any() else 1.6
-                avg_sl = pnl_raw[pnl_raw < 0].mean() if (pnl_raw < 0).any() else -0.8
-                pnl = avg_tp if outcome > 0 else avg_sl
+                # Modo historico: PnL fijo del backtest
+                pnl = pnl_raw[idx]
 
             capital += pnl
             equity.append(capital)

@@ -27,14 +27,13 @@ def _sma(series: pd.Series, period: int) -> float:
     return series.iloc[-period:].mean()
 
 
-def get_trend(df: pd.DataFrame, sma_period: int = 50) -> str:
+def get_trend(df: pd.DataFrame, sma_period: int = 50, threshold: float = 0.0010) -> str:
     """
     Tendencia basada en SMA50.
-    FIX v4: umbral subido a 0.10% (era 0.03%).
-    EURUSD se mueve 0.5-1% diario; 0.03% no filtraba nada util.
-    BUY  -> precio >0.10% por encima de SMA50
-    SELL -> precio >0.10% por debajo de SMA50
-    NEUTRAL -> dentro del margen +/-0.10%
+    v5: threshold configurable por par (EURUSD/GBPUSD=0.0010, USDJPY=0.0015).
+    BUY  -> precio > threshold por encima de SMA50
+    SELL -> precio > threshold por debajo de SMA50
+    NEUTRAL -> dentro del margen
     """
     if len(df) < sma_period:
         return "NEUTRAL"
@@ -44,9 +43,9 @@ def get_trend(df: pd.DataFrame, sma_period: int = 50) -> str:
         return "NEUTRAL"
     last_close = close.iloc[-1]
     diff_pct = (last_close - sma_val) / sma_val
-    if diff_pct > 0.0010:       # FIX: era 0.0003 → ahora 0.0010
+    if diff_pct > threshold:
         return "BUY"
-    elif diff_pct < -0.0010:    # FIX: era -0.0003 → ahora -0.0010
+    elif diff_pct < -threshold:
         return "SELL"
     return "NEUTRAL"
 
@@ -180,6 +179,7 @@ def evaluate_confluence(
     sentiment: dict,
     av_score: float,
     news_block: bool,
+    trend_threshold: float = 0.0010,
 ) -> Tuple[str, str, dict]:
     """
     Arbol WDC Hibrida v2.0 — 4 niveles estrictos.
@@ -210,8 +210,8 @@ def evaluate_confluence(
     levels["nivel_1_noticias"] = "OK — sin eventos HIGH"
 
     # ── NIVEL 2: Tendencia Macro H4 + H1 ──────────────────────────────────────
-    h4_trend = get_trend(h4)
-    h1_trend = get_trend(h1)
+    h4_trend = get_trend(h4, threshold=trend_threshold)
+    h1_trend = get_trend(h1, threshold=trend_threshold)
 
     if h4_trend == "NEUTRAL" and h1_trend == "NEUTRAL":
         levels["nivel_2_sentimiento"] = "FALLO — H4=NEUTRAL H1=NEUTRAL, sin tendencia clara"
