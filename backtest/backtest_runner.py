@@ -5,11 +5,15 @@ Aplica logica de fases de capital (capital_guard) del prompt.md.
 
 Cambios v4 (2026-04-22):
 - FIX #1: simulate_sentiment() reemplazado por sentiment_for_backtest().
-  El sentimiento ya NO es completamente aleatorio. Se usa una distribución
-  basada en el sesgo histórico real del EURUSD retail (60-65% long),
-  con variación ±10% por vela para simular cambios intraday.
+  El sentimiento ya NO es completamente aleatorio. Se usa una distribucion
+  basada en el sesgo historico real del EURUSD retail (60-65% long),
+  con variacion ±10% por vela para simular cambios intraday.
 - FIX #4: Filtro de horario Colombia aplicado al backtest (7:00-16:00 UTC).
   El bot real no opera fuera de ese rango; el backtest tampoco debe.
+- FIX #5: MAX_CONSECUTIVE_SL=3 — circuit breaker igual al CapitalGuard real.
+  Si hay 3 SL consecutivos, pausa operaciones hasta el dia siguiente.
+  Elimina rachas destructoras (ej: 5-6 SL seguidos de Apr 14-21).
+  El contador se resetea al inicio de cada dia o cuando entra un TP.
 """
 import numpy as np
 import pandas as pd
@@ -23,8 +27,11 @@ PIP_SIZE = 0.0001
 RISK_PCT = {"CRECIMIENTO": 0.05, "CONSOLIDACION": 0.03, "ESCUDO": 0.01}
 
 MAX_TRADES_SIMULTANEOUS = {"CRECIMIENTO": 1, "CONSOLIDACION": 1, "ESCUDO": 1}
-MAX_TRADES_PER_DAY = 3
-DAILY_STOP_PCT = -0.06
+MAX_TRADES_PER_DAY      = 3
+DAILY_STOP_PCT          = -0.06
+
+# FIX #5: Circuit breaker — igual al CapitalGuard del bot real
+MAX_CONSECUTIVE_SL = 3   # Pausa el dia si hay 3 SL seguidos
 
 # FIX #4: Horario Colombia — igual al CapitalGuard del bot real
 TRADE_HOUR_START_UTC = 7    # 02:00 AM Colombia (UTC-5)
@@ -34,7 +41,6 @@ NEWS_PROB = 0.008
 
 
 def _get_phase(capital: float, capital_week_start: float, pnl_day: float) -> str:
-    daily_target = capital_week_start * (2 ** (1 / 5) - 1)
     pct_towards_daily = (capital - capital_week_start) / (capital_week_start * 0.15 + 1e-9)
 
     if pnl_day / (capital_week_start + 1e-9) <= DAILY_STOP_PCT:
@@ -57,15 +63,15 @@ def _pip_to_usd(pips: float, lot: float) -> float:
 
 def sentiment_for_backtest(rng: np.random.Generator, base_long_pct: float = 62.0) -> dict:
     """
-    FIX #1: Sentimiento más realista para backtest EURUSD.
+    FIX #1: Sentimiento mas realista para backtest EURUSD.
 
     En lugar de generar valores completamente aleatorios, usa como base
-    el sesgo histórico real del retail en EURUSD (~60-65% long) con una
-    variación gaussiana ±10% por vela para simular fluctuaciones intraday.
+    el sesgo historico real del retail en EURUSD (~60-65% long) con una
+    variacion gaussiana ±10% por vela para simular fluctuaciones intraday.
 
-    base_long_pct: Porcentaje base de retail long (default 62% = promedio histórico EURUSD).
+    base_long_pct: Porcentaje base de retail long (default 62% = promedio historico EURUSD).
     """
-    noise = rng.normal(0, 10)                              # variación ±10% intraday
+    noise    = rng.normal(0, 10)
     long_pct = float(np.clip(base_long_pct + noise, 30, 85))
     short_pct = 100.0 - long_pct
     return {"short_pct": round(short_pct, 1), "long_pct": round(long_pct, 1)}
@@ -83,8 +89,9 @@ def run_backtest(
     Retorna DataFrame con todas las operaciones ejecutadas.
 
     v4:
-    - Sentimiento basado en sesgo histórico real EURUSD (FIX #1).
+    - Sentimiento basado en sesgo historico real EURUSD (FIX #1).
     - Horario Colombia 7:00-16:00 UTC aplicado (FIX #4).
+    - Circuit breaker MAX_CONSECUTIVE_SL=3 (FIX #5).
     """
     rng = np.random.default_rng(seed)
     m15_full = frames["M15"]
@@ -95,10 +102,14 @@ def run_backtest(
     capital_week_start = initial_capital
     trades             = []
 
-    pnl_day       = 0.0
-    trades_today  = 0
-    last_date     = None
-    last_week     = None
+    pnl_day           = 0.0
+    trades_today      = 0
+    last_date         = None
+    last_week         = None
+
+    # FIX #5: contador de SL consecutivos
+    consecutive_sl        = 0
+    sl_pause_until_date   = None   # fecha hasta la que se pausa (None = sin pausa)
 
     active_exit_times = []
 
@@ -109,6 +120,7 @@ def run_backtest(
     print(f"[Backtest] Limites v4: max {MAX_TRADES_PER_DAY} trades/dia, "
           f"max {MAX_TRADES_SIMULTANEOUS['CRECIMIENTO']} simultaneo")
     print(f"[Backtest] Horario Colombia: {TRADE_HOUR_START_UTC}:00 - {TRADE_HOUR_END_UTC}:00 UTC")
+    print(f"[Backtest] Circuit breaker: pausa tras {MAX_CONSECUTIVE_SL} SL consecutivos")
 
     for i in tqdm(range(start_idx, len(m15_full)), desc="Simulando velas"):
         ts    = m15_full.index[i]
@@ -125,15 +137,18 @@ def run_backtest(
         current_week = ts.isocalendar()[:2]
 
         if last_date != current_date:
-            pnl_day      = 0.0
-            trades_today = 0
-            last_date    = current_date
+            pnl_day           = 0.0
+            trades_today      = 0
+            last_date         = current_date
+            # FIX #5: el circuit breaker se resetea al inicio de cada nuevo dia
+            consecutive_sl    = 0
+            sl_pause_until_date = None
 
         if last_week != current_week:
             capital_week_start = capital
             last_week          = current_week
 
-        # FIX #4: Filtro horario Colombia (7:00 - 16:00 UTC) ──────────────────
+        # FIX #4: Filtro horario Colombia (7:00 - 16:00 UTC)
         if not (TRADE_HOUR_START_UTC <= ts.hour < TRADE_HOUR_END_UTC):
             continue
 
@@ -150,6 +165,10 @@ def run_backtest(
         if trades_today >= MAX_TRADES_PER_DAY:
             continue
 
+        # FIX #5: Circuit breaker activo — saltamos el resto del dia
+        if sl_pause_until_date is not None and current_date <= sl_pause_until_date:
+            continue
+
         # Limite trades simultaneos
         active_exit_times = [t for t in active_exit_times if t > ts]
         max_simultaneous  = MAX_TRADES_SIMULTANEOUS.get(phase, 1)
@@ -158,7 +177,7 @@ def run_backtest(
 
         # Inputs externos
         news_block = rng.random() < NEWS_PROB
-        sentiment  = sentiment_for_backtest(rng)   # FIX #1: usa sesgo histórico real
+        sentiment  = sentiment_for_backtest(rng)   # FIX #1
         av_score   = simulate_av_score(rng)
 
         # Evaluar confluencia
@@ -226,6 +245,18 @@ def run_backtest(
         pnl_usd = _pip_to_usd(pips_result, lot)
         capital += pnl_usd
         pnl_day += pnl_usd
+
+        # FIX #5: actualizar contador de SL consecutivos
+        if outcome == "SL":
+            consecutive_sl += 1
+            if consecutive_sl >= MAX_CONSECUTIVE_SL:
+                # Pausa el resto del dia actual
+                sl_pause_until_date = current_date
+                print(f"[Backtest] Circuit breaker activado en {ts.date()} "
+                      f"tras {consecutive_sl} SL consecutivos — pausando dia")
+        else:
+            # TP o TIMEOUT resetea el contador
+            consecutive_sl = 0
 
         exit_timestamp = m15_full.index[exit_idx]
         active_exit_times.append(exit_timestamp)
