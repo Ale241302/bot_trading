@@ -2,6 +2,11 @@
 data_loader.py
 Descarga datos historicos OHLCV de EURUSD en M15, H1 y H4
 usando yfinance. Devuelve DataFrames sincronizados por timestamp UTC.
+
+Limites reales de yfinance por intervalo:
+  - 15m : max 60 dias por request  -> se descarga en chunks de 55 dias
+  - 1h  : max 730 dias (2 anios)   -> una sola llamada
+  - 4h  : max 730 dias (2 anios)   -> una sola llamada
 """
 import yfinance as yf
 import pandas as pd
@@ -12,31 +17,38 @@ logger = logging.getLogger(__name__)
 
 SYMBOL = "EURUSD=X"
 
-INTERVAL_MAP = {
-    "M15": "15m",
-    "H1":  "1h",
-    "H4":  "4h",
+# Limites duros de yfinance para datos intraday
+_MAX_DAYS = {
+    "1h":  729,   # justo bajo 730 para evitar errores de borde
+    "4h":  729,
+    "15m":  59,   # max 60 dias, usamos 59 para seguridad
 }
+_CHUNK_DAYS = {
+    "15m": 55,    # chunks solapados para M15
+}
+
 
 def download_data(years: int = 2) -> dict[str, pd.DataFrame]:
     """
     Descarga EURUSD para M15, H1 y H4 por los ultimos `years` anios.
-    yfinance limita datos intraday:
-      - 15m: maximo 60 dias por llamada -> se descarga en chunks de 55 dias
-      - 1h:  maximo 730 dias (2 anios)
-      - 4h:  maximo 730 dias (2 anios)
+
+    - H1 y H4: una sola llamada, hasta 729 dias (respeta el limite de yfinance).
+    - M15: descarga en chunks de 55 dias y concatena (limite de 60 dias/request).
+
     Retorna dict con keys 'M15', 'H1', 'H4'.
     """
-    # Yahoo intraday data (M15, H1, H4) is strictly limited to the last 60-730 days.
-    # To ensure synchronization and availability, we limit all to the last 59 days.
-    end   = datetime.utcnow()
-    start = end - timedelta(days=59)
+    end = datetime.utcnow()
+    requested_days = min(years * 365, 729)  # nunca pedir mas de 729 dias
 
     frames = {}
 
-    # ---- H1 y H4 ----
+    # ── H1 y H4: una sola llamada con el maximo disponible ──────────────────
     for tf, interval in [("H1", "1h"), ("H4", "4h")]:
-        logger.info(f"Descargando {tf} ({interval}) desde {start.date()} hasta {end.date()}")
+        days = min(requested_days, _MAX_DAYS[interval])
+        start = end - timedelta(days=days)
+        logger.info(
+            f"Descargando {tf} ({interval}) desde {start.date()} hasta {end.date()}"
+        )
         df = yf.download(
             SYMBOL,
             start=start.strftime("%Y-%m-%d"),
@@ -47,26 +59,47 @@ def download_data(years: int = 2) -> dict[str, pd.DataFrame]:
         )
         if not df.empty:
             df = _clean(df)
+        else:
+            df = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
         frames[tf] = df
         logger.info(f"  {tf}: {len(df)} velas descargadas")
 
-    # ---- M15 ----
-    logger.info("Descargando M15...")
-    m15 = yf.download(
-        SYMBOL,
-        start=start.strftime("%Y-%m-%d"),
-        end=end.strftime("%Y-%m-%d"),
-        interval="15m",
-        auto_adjust=True,
-        progress=False,
-    )
-    if not m15.empty:
-        m15 = _clean(m15)
+    # ── M15: chunks de 55 dias hasta cubrir `requested_days` ────────────────
+    logger.info("Descargando M15 (chunks de 55 dias)...")
+    chunk_size = _CHUNK_DAYS["15m"]
+    m15_days = min(requested_days, _MAX_DAYS["15m"])  # yfinance hard-limit
+    chunks = []
+    chunk_end = end
+    days_covered = 0
+
+    while days_covered < m15_days:
+        remaining = m15_days - days_covered
+        this_chunk = min(chunk_size, remaining)
+        chunk_start = chunk_end - timedelta(days=this_chunk)
+
+        df_chunk = yf.download(
+            SYMBOL,
+            start=chunk_start.strftime("%Y-%m-%d"),
+            end=chunk_end.strftime("%Y-%m-%d"),
+            interval="15m",
+            auto_adjust=True,
+            progress=False,
+        )
+        if not df_chunk.empty:
+            chunks.append(_clean(df_chunk))
+
+        days_covered += this_chunk
+        chunk_end = chunk_start  # mover ventana hacia atras
+
+    if chunks:
+        m15 = pd.concat(chunks)
+        m15 = m15[~m15.index.duplicated(keep="last")]
+        m15.sort_index(inplace=True)
     else:
         m15 = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
 
     frames["M15"] = m15
-    logger.info(f"  M15: {len(m15)} velas descargadas")
+    logger.info(f"  M15: {len(m15)} velas descargadas ({m15_days} dias)")
 
     return frames
 
