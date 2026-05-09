@@ -320,7 +320,16 @@ def run_ai_wdc(
 
             # Construir contexto para la IA — sin sentimiento externo
             phase_ctx = _build_phase_context(capital, initial_capital, risk_pct)
-            cap_status = _build_capital_status(capital, initial_capital, trades_today=len(trades))
+            # FIX: solo trades del día UTC actual. Antes pasaba len(trades)
+            # como "trades hoy" → la IA alucinaba "10 trades hoy".
+            ts_date = pd.Timestamp(ts).date()
+            trades_today_count = sum(
+                1 for t in trades
+                if pd.Timestamp(t["entry_ts"]).date() == ts_date
+            )
+            cap_status = _build_capital_status(
+                capital, initial_capital, trades_today=trades_today_count
+            )
             market_ctx = (
                 f"TECH_ACTION={tech_action}\n"
                 f"TECH_REASON={tech_reason}\n"
@@ -512,7 +521,13 @@ def run_ai_csm(
             candles=sliced,
             history=[],
             open_positions=[],
-            capital_status=_build_capital_status(capital, initial_capital, len(trades)),
+            capital_status=_build_capital_status(
+                capital, initial_capital,
+                trades_today=sum(
+                    1 for t in trades
+                    if pd.Timestamp(t["entry_ts"]).date() == pd.Timestamp(entry_signal.timestamp).date()
+                ),
+            ),
             market_context=market_ctx,
             myfxbook_sentiment=None,    # IA verá "no disponible"
             phase_context=_build_phase_context(capital, initial_capital, risk_pct),

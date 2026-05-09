@@ -164,8 +164,32 @@ docker compose up --build
 - ✅ Multi-par funcional en backtest (EURUSD/GBPUSD/USDJPY)
 - ✅ Circuit breakers diario (3 SL) y semanal (5 SL en 7 días) implementados
 - ✅ Diagnóstico unificado en `scripts/check_env.py`
+- ✅ Backtest IA-driven (`backtest/run_ai_backtest.py`) con Monte Carlo integrado
+- ✅ Comparador de niveles de riesgo (`backtest/compare_risk.py`)
 - 🔧 Tech-debt visible: hardcode de pips en `trader.py`, doble llamada a Myfxbook, `print()` en lugar de logging estructurado, sin atomic writes
 - 🧪 Cobertura de tests: solo integración por servicio. Sin unit tests de `trader`, `capital_guard`, `signal_engine` — el backtest hace de regresión
+
+### 7.1 Validación de estrategia (mayo 2026)
+
+Backtest AI-driven con `gpt-4o-mini`, riesgo 5%, sin sentimiento externo, 60 días yfinance:
+- 🟢 **VIABLE**: PF 2.86, WR 57.1%, DD 14.8%, Capital $50→$78.24 (+56%)
+- Monte Carlo 1000 sims: **Ruina 0%**, Duplican 20.3%, Mediana $78.79
+- Comportamiento IA: 77.8% confirma técnico, 22.2% override→HOLD (la IA filtra)
+
+Camino agresivo (riesgo 10%) **rechazado** tras run real: la IA decide diferente con capital distinto y alucina límites ("11 trades hoy" cuando solo había 7). PF 0.87, ruina 31.9%. Lección: el MC bootstrap reescalado **NO** es válido cuando hay un modelo discrecional en el medio.
+
+### 7.2 Plan de paper-trading demo
+
+1. **Ejecutar `python scripts/check_env.py`** y validar que MT5/OpenAI/Notion/Pinecone/Myfxbook estén OK.
+2. **Activar AutoTrading** en MT5 (botón verde).
+3. **Arrancar `python main.py`** con `CAPITAL_TRABAJO=50` en `.env`.
+4. **Observar 4 semanas mínimo** en demo Pepperstone. Métricas a vigilar:
+   - WR ≥ 48% (alarma si <42% en semana 2).
+   - DD máximo ≤ 25% (pausar bot si supera 30% en cualquier momento).
+   - PF ≥ 1.5 sobre 20+ trades (alarma si <1.2).
+   - Si la IA hace override→HOLD <10%, revisar prompt — está siendo sello de goma.
+5. **Si pasa demo 4 semanas** con esos umbrales: pasar a live con $50 reales.
+6. **Si falla**: revisar Notion para ver qué tipo de trades fallaron y endurecer filtros.
 
 ---
 
