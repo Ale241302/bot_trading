@@ -1,10 +1,22 @@
-# Dependencias exclusivas del módulo backtest
+# ───────────────────────────────────────────────────────────────
+# requirements-backtest.txt  →  Solo para backtest + Monte Carlo + reporte HTML.
 # Instalar con: pip install -r requirements-backtest.txt
-yfinance>=0.2.40
-pandas>=2.0.0
-numpy>=1.26.0
-matplotlib>=3.8.0
-scipy>=1.12.0
-tqdm>=4.66.0
-plotly>=5.20.0
-kaleido>=0.2.1
+#
+# NOTA SOBRE PINS:
+# yfinance/pandas/numpy/tqdm están pineados (mismas versiones que el bot live).
+# matplotlib/scipy/plotly/kaleido usan ">=" porque las versiones específicas
+# cambian con cada release de Python (y aquí soportamos Py 3.11–3.14).
+# Los rangos son los que tienen wheels precompilados al día de hoy.
+# ───────────────────────────────────────────────────────────────
+
+# Fijos (compartidos con el bot live)
+yfinance==1.3.0
+pandas==3.0.2
+numpy==2.4.4
+tqdm==4.67.3
+
+# Plot / análisis (rangos compatibles con Py 3.11–3.14)
+matplotlib>=3.10.0       # primeros wheels cp314 en 3.10.x
+scipy>=1.15.0            # primeros wheels cp314 en 1.15.x
+plotly>=6.0.0            # API moderna; v5 también funciona si ya está instalado
+kaleido>=1.0.0           # exportador de imágenes para plotly (v0.2.x está deprecada)

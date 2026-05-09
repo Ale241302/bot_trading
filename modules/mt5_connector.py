@@ -9,15 +9,39 @@ Conexion con MetaTrader 5:
 ────────────────────────────────────────────
 """
 
+import logging
 import os
+
 import MetaTrader5 as mt5
 import pandas as pd
 
+logger = logging.getLogger(__name__)
+
+
 class MT5Connector:
     def __init__(self):
-        self.login    = int(os.getenv("MT5_LOGIN"))
-        self.password = os.getenv("MT5_PASSWORD")
-        self.server   = os.getenv("MT5_SERVER")
+        login_raw     = os.getenv("MT5_LOGIN", "").strip()
+        password      = os.getenv("MT5_PASSWORD", "").strip()
+        server        = os.getenv("MT5_SERVER", "").strip()
+
+        missing = [name for name, val in
+                   [("MT5_LOGIN", login_raw), ("MT5_PASSWORD", password), ("MT5_SERVER", server)]
+                   if not val]
+        if missing:
+            raise RuntimeError(
+                f"MT5Connector: faltan variables de entorno: {', '.join(missing)}. "
+                f"Verifica el archivo .env."
+            )
+
+        try:
+            self.login = int(login_raw)
+        except ValueError:
+            raise RuntimeError(
+                f"MT5Connector: MT5_LOGIN debe ser numérico, recibido: '{login_raw}'."
+            )
+
+        self.password = password
+        self.server   = server
 
     def is_connected(self) -> bool:
         """Verifica si el terminal MT5 está inicializado y conectado."""
@@ -43,25 +67,36 @@ class MT5Connector:
 
         # Si no, intentamos (re)inicializar
         if not mt5.initialize():
-            print(f"Error MT5 initialize(): {mt5.last_error()}")
+            logger.error(f"Error MT5 initialize(): {mt5.last_error()}")
             return False
 
         authorized = mt5.login(self.login, password=self.password, server=self.server)
         if not authorized:
-            print(f"Login fallido: {mt5.last_error()}")
-            # No apagamos aquí forzosamente para permitir reintentos posteriores
+            logger.error(f"Login MT5 fallido: {mt5.last_error()}")
+            # Liberamos la sesión para no dejar terminal zombie con login inválido.
+            # Si el problema es transitorio, el siguiente connect() reintenta limpio.
+            try:
+                mt5.shutdown()
+            except Exception as e:
+                logger.warning(f"shutdown() tras login fallido falló: {e}")
             return False
 
         info = mt5.account_info()
         if info:
-            print(f"✅ MT5 conectado | Cuenta: {info.login} | {info.server}")
+            logger.info(f"✅ MT5 conectado | Cuenta: {info.login} | {info.server}")
             return True
-        
+
+        # initialize() OK pero account_info() devolvió None: estado inconsistente,
+        # liberamos para no dejar sesión a medio iniciar.
+        try:
+            mt5.shutdown()
+        except Exception:
+            pass
         return False
 
     def disconnect(self):
         mt5.shutdown()
-        print("MT5 desconectado.")
+        logger.info("MT5 desconectado.")
 
     def get_candles(self, symbol: str, count: int = 50, timeframe=mt5.TIMEFRAME_M15) -> pd.DataFrame | None:
         """
@@ -70,7 +105,7 @@ class MT5Connector:
         """
         rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
         if rates is None or len(rates) == 0:
-            print(f"No se obtuvieron velas para {symbol}: {mt5.last_error()}")
+            logger.warning(f"No se obtuvieron velas para {symbol}: {mt5.last_error()}")
             return None
 
         df = pd.DataFrame(rates)

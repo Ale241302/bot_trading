@@ -14,10 +14,11 @@ Limites reales de yfinance por intervalo:
   - 1h  : max 730 dias (2 anios)   -> una sola llamada
   - 4h  : max 730 dias (2 anios)   -> una sola llamada
 """
-import yfinance as yf
-import pandas as pd
-from datetime import datetime, timedelta
 import logging
+from datetime import datetime, timedelta, timezone
+
+import pandas as pd
+import yfinance as yf
 
 from .pair_config import PAIR_SPECS, DEFAULT_PAIRS
 
@@ -50,7 +51,9 @@ def download_data(
     if symbols is None:
         symbols = DEFAULT_PAIRS
 
-    end = datetime.utcnow()
+    # datetime.utcnow() está deprecado en Py 3.12+; usar timezone-aware y dropear tz para
+    # mantener compatibilidad con yfinance que espera naive UTC.
+    end = datetime.now(timezone.utc).replace(tzinfo=None)
     requested_days = min(years * 365, 729)
 
     all_frames = {}

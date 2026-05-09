@@ -7,9 +7,28 @@ y lee el historial para darselo como contexto a la IA.
 ================================================
 """
 
+import logging
 import os
 from datetime import datetime, timezone
+
 from notion_client import Client
+
+logger = logging.getLogger(__name__)
+
+
+def _safe_get(node, path, default=None):
+    """
+    Recorre `node` siguiendo la lista de claves/índices `path`.
+    Devuelve `default` si cualquier acceso falla (KeyError/IndexError/TypeError)
+    o si el valor final es None.
+    """
+    try:
+        for p in path:
+            node = node[p]
+    except (KeyError, IndexError, TypeError):
+        return default
+    return default if node is None else node
+
 
 class NotionLogger:
     def __init__(self):
@@ -50,7 +69,7 @@ class NotionLogger:
             parent={"database_id": self.db_id},
             properties=properties
         )
-        print(f"Notion: operacion registrada -> {title}")
+        logger.info(f"Notion: operación registrada -> {title}")
         return response.get("id")
 
     def update_operation(self, page_id: str, price_close: float, result_usd: float):
@@ -65,30 +84,30 @@ class NotionLogger:
             
         try:
             self.client.pages.update(page_id=page_id, properties=properties)
-            print(f"Notion: operación {page_id} actualizada a Cerrada.")
-        except Exception as e:
-            print(f"Notion Error actualizando {page_id}: {e}")
+            logger.info(f"Notion: operación {page_id} actualizada a Cerrada.")
+        except Exception:
+            # logger.exception incluye el stacktrace completo (vital para distinguir
+            # 404 page-not-found vs 403 token revocado vs 500 transitorio).
+            logger.exception(f"Notion error actualizando page_id={page_id}")
 
 
     def get_recent_operations(self, limit: int = 10) -> list:
         response = self.client.databases.query(
             database_id=self.db_id,
             sorts=[{"timestamp": "created_time", "direction": "descending"}],
-            page_size=limit
+            page_size=limit,
         )
 
         operations = []
         for page in response.get("results", []):
             props = page["properties"]
-            try:
-                operations.append({
-                    "date":   props["Fecha"]["date"]["start"][:10]                                       if props["Fecha"]["date"] else "",
-                    "type":   props["Tipo"]["select"]["name"]                                            if props["Tipo"]["select"] else "",
-                    "symbol": props["Par"]["rich_text"][0]["text"]["content"]                            if props["Par"]["rich_text"] else "",
-                    "result": props["Resultado (USD)"]["number"]                                         if props["Resultado (USD)"]["number"] is not None else 0,
-                    "reason": props["Motivo / An\u00e1lisis IA"]["rich_text"][0]["text"]["content"]        if props["Motivo / An\u00e1lisis IA"]["rich_text"] else ""
-                })
-            except Exception:
-                continue
+            date_start = _safe_get(props, ["Fecha", "date", "start"], default="")
+            operations.append({
+                "date":   date_start[:10] if date_start else "",
+                "type":   _safe_get(props, ["Tipo", "select", "name"], default=""),
+                "symbol": _safe_get(props, ["Par", "rich_text", 0, "text", "content"], default=""),
+                "result": _safe_get(props, ["Resultado (USD)", "number"], default=0) or 0,
+                "reason": _safe_get(props, ["Motivo / An\u00e1lisis IA", "rich_text", 0, "text", "content"], default=""),
+            })
 
         return operations

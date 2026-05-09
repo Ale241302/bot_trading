@@ -18,27 +18,25 @@ import pandas as pd
 from tqdm import tqdm
 from .signal_engine import evaluate_confluence, simulate_av_score
 from .pair_config import PAIR_SPECS, DEFAULT_PAIRS
+from modules.capital_guard import (
+    RISK_PCT,
+    MAX_TRADES_SIMULTANEOUS,
+    MAX_TRADES_PER_DAY,
+    MAX_CONSECUTIVE_SL,
+    MAX_SL_WEEK,
+    TRADE_HOUR_START_UTC,
+    TRADE_HOUR_END_UTC,
+)
 
-# ── Constantes globales de gestion ────────────────────────────────────
-RISK_PCT = {"CRECIMIENTO": 0.05, "CONSOLIDACION": 0.03, "ESCUDO": 0.01}
+# Constantes específicas del backtest (no aplican al bot live)
+DAILY_STOP_PCT = -0.06   # tope diario del backtest (live usa MAX_DAILY_LOSS_PCT)
+NEWS_PROB      = 0.008   # probabilidad simulada de noticia HIGH por vela
 
-MAX_TRADES_SIMULTANEOUS = {"CRECIMIENTO": 1, "CONSOLIDACION": 1, "ESCUDO": 1}
-MAX_TRADES_PER_DAY      = 3       # global entre todos los pares
-DAILY_STOP_PCT          = -0.06
-
-# Circuit breaker DIARIO — 3 SL consecutivos pausa el dia
-MAX_CONSECUTIVE_SL = 3
-
-# Circuit breaker SEMANAL — 5 SL en 7 dias pausa la semana
-MAX_SL_WEEK = 5
-
-# Horario Colombia (UTC)
-TRADE_HOUR_START_UTC = 7
-TRADE_HOUR_END_UTC   = 16
-
-NEWS_PROB = 0.008
-
-# Lookback FIJO para H1/H4
+# Lookback FIJO para H1/H4 (en velas, no en días).
+# NOTA: NO equivale a "últimos N días reales" cuando hay gaps de fin de semana
+#   o festivos. 100 velas H1 ≈ 4 días continuos de mercado abierto; 100 H4 ≈ 16 días.
+#   Esto introduce un sesgo menor en la SMA50 cerca de los lunes y tras festivos.
+#   Aceptable para la estrategia actual (filtro de tendencia macro) pero documentado.
 H1_LOOKBACK = 100
 H4_LOOKBACK = 100
 
@@ -69,6 +67,114 @@ def _next_monday(date) -> datetime.date:
     """Devuelve la fecha del lunes siguiente a 'date'."""
     days_ahead = 7 - date.weekday()
     return date + datetime.timedelta(days=days_ahead)
+
+
+def _simulate_trade_outcome(
+    action: str,
+    m15_full: pd.DataFrame,
+    pair_idx: int,
+    entry_price: float,
+    sl_price: float,
+    tp_price: float,
+    max_lookahead: int = 200,
+) -> tuple[str, float, int]:
+    """
+    Avanza vela a vela en M15 hasta SL, TP o agotar `max_lookahead`.
+    Retorna (outcome, exit_price, exit_idx).
+    outcome ∈ {"SL", "TP", "TIMEOUT"}.
+    """
+    max_future = min(pair_idx + max_lookahead, len(m15_full))
+
+    for j in range(pair_idx + 1, max_future):
+        future = m15_full.iloc[j]
+        if action == "BUY":
+            if future["Low"] <= sl_price:
+                return "SL", sl_price, j
+            if future["High"] >= tp_price:
+                return "TP", tp_price, j
+        else:
+            if future["High"] >= sl_price:
+                return "SL", sl_price, j
+            if future["Low"] <= tp_price:
+                return "TP", tp_price, j
+
+    exit_idx = max_future - 1
+    return "TIMEOUT", float(m15_full.iloc[exit_idx]["Close"]), exit_idx
+
+
+def _update_breakers_after_sl(
+    current_date: datetime.date,
+    consecutive_sl: int,
+    sl_week_dates: list,
+    weekly_pause_until,
+    symbol: str,
+    ts,
+) -> tuple[int, list, datetime.date | None, datetime.date | None]:
+    """
+    Actualiza los circuit breakers tras un SL.
+    Retorna (consecutive_sl, sl_week_dates, sl_pause_until_date, weekly_pause_until).
+    """
+    consecutive_sl += 1
+    sl_pause_until_date = None
+    if consecutive_sl >= MAX_CONSECUTIVE_SL:
+        sl_pause_until_date = current_date
+        print(f"[CB-Diario]  {ts.date()} {symbol} — {consecutive_sl} SL consecutivos -> pausa hoy")
+
+    sl_week_dates.append(current_date)
+    if len(sl_week_dates) >= MAX_SL_WEEK and weekly_pause_until is None:
+        weekly_pause_until = _next_monday(current_date)
+        print(f"[CB-Semanal] {ts.date()} {symbol} — {len(sl_week_dates)} SL en 7 dias "
+              f"-> pausa hasta {weekly_pause_until}")
+
+    return consecutive_sl, sl_week_dates, sl_pause_until_date, weekly_pause_until
+
+
+def _make_trade_record(
+    *,
+    symbol: str,
+    ts,
+    exit_timestamp,
+    action: str,
+    entry_price: float,
+    exit_price: float,
+    lot: float,
+    pips_result: float,
+    pnl_usd: float,
+    capital: float,
+    outcome: str,
+    phase: str,
+    duration_candles: int,
+    reason: str,
+    sentiment: dict,
+    av_score: float,
+    news_block: bool,
+    conf_levels: dict,
+) -> dict:
+    """Construye el dict de un trade para el DataFrame final."""
+    return {
+        "symbol":           symbol,
+        "entry_time":       ts,
+        "exit_time":        exit_timestamp,
+        "action":           action,
+        "entry_price":      round(entry_price, 5),
+        "exit_price":       round(exit_price, 5),
+        "lot":              lot,
+        "pips":             round(pips_result, 1),
+        "pnl_usd":          round(pnl_usd, 4),
+        "capital_after":    round(capital, 4),
+        "outcome":          outcome,
+        "phase":            phase,
+        "duration_candles": duration_candles,
+        "duration_hours":   round(duration_candles * 0.25, 2),
+        "reason":           reason,
+        "sentiment_short":  round(sentiment["short_pct"], 1),
+        "av_score":         round(av_score, 3),
+        "news_blocked":     news_block,
+        "nivel_1":          conf_levels["nivel_1_noticias"],
+        "nivel_2":          conf_levels["nivel_2_tendencia"],
+        "nivel_3":          conf_levels["nivel_3_sentimiento"],
+        "nivel_4":          conf_levels["nivel_4_patron"],
+    }
 
 
 def sentiment_for_backtest(rng: np.random.Generator, base_long_pct: float = 62.0) -> dict:
@@ -188,6 +294,11 @@ def run_backtest(
         print("[Backtest] ERROR: Muy pocas velas en timeline unificada.")
         return pd.DataFrame()
 
+    print("[Backtest] " + "=" * 58)
+    print("[Backtest] ⚠️  SENTIMIENTO SINTÉTICO: Myfxbook se simula con distribución")
+    print("[Backtest]    normal por par (sentiment_for_backtest). Los resultados serán")
+    print("[Backtest]    SOBREOPTIMISTAS si el sentimiento real divergiera del histórico.")
+    print("[Backtest]    Para validación final usa periodos de paper-trading en demo.")
     print("[Backtest] " + "=" * 58)
     print(f"[Backtest] Multi-par capital compartido: {', '.join(active_symbols)}")
     print(f"[Backtest] Timeline unificada: {total_velas - start_idx} velas M15")
@@ -318,41 +429,9 @@ def run_backtest(
             sl_price = entry_price + sl_pips * pip_size
             tp_price = entry_price - tp_pips * pip_size
 
-        # Avanzar velas hasta SL o TP (en el M15 del par)
-        outcome    = None
-        exit_idx   = pair_idx
-        exit_price = entry_price
-        max_future = min(pair_idx + 200, len(m15_full))
-
-        for j in range(pair_idx + 1, max_future):
-            future = m15_full.iloc[j]
-            if action == "BUY":
-                if future["Low"] <= sl_price:
-                    outcome    = "SL"
-                    exit_price = sl_price
-                    exit_idx   = j
-                    break
-                if future["High"] >= tp_price:
-                    outcome    = "TP"
-                    exit_price = tp_price
-                    exit_idx   = j
-                    break
-            else:
-                if future["High"] >= sl_price:
-                    outcome    = "SL"
-                    exit_price = sl_price
-                    exit_idx   = j
-                    break
-                if future["Low"] <= tp_price:
-                    outcome    = "TP"
-                    exit_price = tp_price
-                    exit_idx   = j
-                    break
-
-        if outcome is None:
-            outcome    = "TIMEOUT"
-            exit_idx   = max_future - 1
-            exit_price = m15_full.iloc[exit_idx]["Close"]
+        outcome, exit_price, exit_idx = _simulate_trade_outcome(
+            action, m15_full, pair_idx, entry_price, sl_price, tp_price,
+        )
 
         # ── PnL ──────────────────────────────────────────────────────
         if action == "BUY":
@@ -366,16 +445,14 @@ def run_backtest(
 
         # ── Actualizar circuit breakers (GLOBALES) ───────────────────
         if outcome == "SL":
-            consecutive_sl += 1
-            if consecutive_sl >= MAX_CONSECUTIVE_SL:
-                sl_pause_until_date = current_date
-                print(f"[CB-Diario]  {ts.date()} {symbol} — {consecutive_sl} SL consecutivos -> pausa hoy")
-
-            sl_week_dates.append(current_date)
-            if len(sl_week_dates) >= MAX_SL_WEEK and weekly_pause_until is None:
-                weekly_pause_until = _next_monday(current_date)
-                print(f"[CB-Semanal] {ts.date()} {symbol} — {len(sl_week_dates)} SL en 7 dias "
-                      f"-> pausa hasta {weekly_pause_until}")
+            consecutive_sl, sl_week_dates, new_pause, weekly_pause_until = (
+                _update_breakers_after_sl(
+                    current_date, consecutive_sl, sl_week_dates,
+                    weekly_pause_until, symbol, ts,
+                )
+            )
+            if new_pause is not None:
+                sl_pause_until_date = new_pause
         else:
             consecutive_sl = 0
 
@@ -385,30 +462,14 @@ def run_backtest(
 
         duration_candles = exit_idx - pair_idx
 
-        trades.append({
-            "symbol":           symbol,
-            "entry_time":       ts,
-            "exit_time":        exit_timestamp,
-            "action":           action,
-            "entry_price":      round(entry_price, 5),
-            "exit_price":       round(exit_price, 5),
-            "lot":              lot,
-            "pips":             round(pips_result, 1),
-            "pnl_usd":          round(pnl_usd, 4),
-            "capital_after":    round(capital, 4),
-            "outcome":          outcome,
-            "phase":            phase,
-            "duration_candles": duration_candles,
-            "duration_hours":   round(duration_candles * 0.25, 2),
-            "reason":           reason,
-            "sentiment_short":  round(sentiment["short_pct"], 1),
-            "av_score":         round(av_score, 3),
-            "news_blocked":     news_block,
-            "nivel_1":          conf_levels["nivel_1_noticias"],
-            "nivel_2":          conf_levels["nivel_2_sentimiento"],
-            "nivel_3":          conf_levels["nivel_3_tendencia"],
-            "nivel_4":          conf_levels["nivel_4_patron"],
-        })
+        trades.append(_make_trade_record(
+            symbol=symbol, ts=ts, exit_timestamp=exit_timestamp,
+            action=action, entry_price=entry_price, exit_price=exit_price,
+            lot=lot, pips_result=pips_result, pnl_usd=pnl_usd, capital=capital,
+            outcome=outcome, phase=phase, duration_candles=duration_candles,
+            reason=reason, sentiment=sentiment, av_score=av_score,
+            news_block=news_block, conf_levels=conf_levels,
+        ))
 
         if capital <= 0:
             print(f"[Backtest] RUINA total en {ts} ({symbol})")

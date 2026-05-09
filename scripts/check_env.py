@@ -1,16 +1,24 @@
 """
 check_env.py
 
-Diagnostico rapido de todas las APIs usadas por market_context.
+Diagnostico rapido de todas las conexiones del bot:
+  MT5, Myfxbook, Notion, Pinecone.
+
 Ejecuta con:
+  python scripts/check_env.py
+o dentro de Docker:
   docker compose run --rm trading-bot python scripts/check_env.py
+
+Solo realiza lecturas/handshakes — no abre ordenes ni escribe en Notion.
 """
 
 import os
 import json
 import requests
 from urllib.parse import quote, unquote
-from datetime import datetime, timezone
+from dotenv import load_dotenv
+
+load_dotenv()
 
 OK  = "\033[92m[OK]\033[0m"
 ERR = "\033[91m[FAIL]\033[0m"
@@ -27,12 +35,13 @@ def _safe_encode(token: str) -> str:
 sep("1. Variables de entorno")
 
 VARS = [
-    "FINNHUB_API_KEY",
-    "ALPHAVANTAGE_API_KEY",
+    "MT5_LOGIN",
+    "MT5_PASSWORD",
+    "MT5_SERVER",
     "MYFXBOOK_EMAIL",
     "MYFXBOOK_PASSWORD",
-    "JBLANKED_API_KEY",
     "OPENAI_API_KEY",
+    "OPENAI_MODEL",
     "NOTION_TOKEN",
     "NOTION_DB_ID",
     "PINECONE_API_KEY",
@@ -44,52 +53,56 @@ for v in VARS:
         masked = val[:6] + "..." + val[-4:] if len(val) > 10 else "***"
         print(f"  {OK} {v} = {masked}")
     else:
-        tag = WRN if v in ("JBLANKED_API_KEY",) else ERR
-        print(f"  {tag} {v} = (vacia)")
+        print(f"  {ERR} {v} = (vacia)")
 
-# ── 2. Finnhub ──────────────────────────────────────────────
-sep("2. Finnhub (precio EURUSD)")
+# ── 2. MetaTrader 5 ─────────────────────────────────────────
+sep("2. MetaTrader 5 (initialize + login + account_info)")
 try:
-    key = os.getenv("FINNHUB_API_KEY", "")
-    if not key:
-        print(f"  {ERR} FINNHUB_API_KEY vacia")
+    import MetaTrader5 as mt5
+
+    login_raw = os.getenv("MT5_LOGIN", "")
+    password  = os.getenv("MT5_PASSWORD", "")
+    server    = os.getenv("MT5_SERVER", "")
+
+    if not (login_raw and password and server):
+        print(f"  {ERR} MT5_LOGIN / MT5_PASSWORD / MT5_SERVER vacias")
     else:
-        now_ts  = int(datetime.now(timezone.utc).timestamp())
-        from_ts = now_ts - 3600
-        r = requests.get(
-            "https://finnhub.io/api/v1/forex/candle",
-            params={"symbol": "OANDA:EUR_USD", "resolution": "1",
-                    "from": from_ts, "to": now_ts, "token": key},
-            timeout=8,
-        )
-        if r.status_code == 200:
-            data   = r.json()
-            closes = data.get("c", [])
-            status = data.get("s", "?")
-            if closes:
-                print(f"  {OK} /forex/candle OK — {len(closes)} velas | cierre: {closes[-1]:.5f}")
+        try:
+            login = int(login_raw)
+        except ValueError:
+            print(f"  {ERR} MT5_LOGIN no es numerico: {login_raw}")
+            login = None
+
+        if login is not None:
+            if not mt5.initialize():
+                print(f"  {ERR} mt5.initialize() fallo: {mt5.last_error()}")
             else:
-                print(f"  {WRN} /forex/candle: sin velas (status={status})")
-        elif r.status_code == 403:
-            print(f"  {WRN} /forex/candle: 403 — plan Free no incluye velas historicas")
-            r2 = requests.get(
-                "https://finnhub.io/api/v1/quote",
-                params={"symbol": "OANDA:EUR_USD", "token": key},
-                timeout=8,
-            )
-            if r2.status_code == 200:
-                q = r2.json()
-                c = q.get("c", 0)
-                if c:
-                    pc = q.get("pc", 0)
-                    cambio = round(((c - pc) / pc) * 100, 4) if pc else 0
-                    print(f"  {OK} /quote EURUSD: {c:.5f} | cambio: {cambio:+.4f}%")
+                authorized = mt5.login(login, password=password, server=server)
+                if not authorized:
+                    print(f"  {ERR} login fallido: {mt5.last_error()}")
                 else:
-                    print(f"  {WRN} /quote precio 0 (mercado cerrado?)")
-            else:
-                print(f"  {ERR} /quote HTTP {r2.status_code}: {r2.text[:100]}")
-        else:
-            print(f"  {ERR} HTTP {r.status_code}: {r.text[:150]}")
+                    info = mt5.account_info()
+                    term = mt5.terminal_info()
+                    if info:
+                        print(f"  {OK} Cuenta: {info.login} | Server: {info.server}")
+                        print(f"  {OK} Balance: {info.balance} {info.currency} | Equity: {info.equity}")
+                        print(f"  {OK} Apalancamiento: 1:{info.leverage} | Trade allowed: {info.trade_allowed}")
+                    if term:
+                        print(f"  {OK} Terminal conectado: {term.connected} | trade_allowed: {term.trade_allowed}")
+
+                    symbol = os.getenv("TRADING_SYMBOL", "EURUSD")
+                    sym_info = mt5.symbol_info(symbol)
+                    if sym_info is None:
+                        print(f"  {WRN} Simbolo {symbol} no disponible en este broker")
+                    else:
+                        tick = mt5.symbol_info_tick(symbol)
+                        if tick:
+                            print(f"  {OK} {symbol}: bid={tick.bid} ask={tick.ask} spread={sym_info.spread}")
+                        else:
+                            print(f"  {WRN} {symbol}: tick no disponible (mercado cerrado?)")
+                mt5.shutdown()
+except ImportError:
+    print(f"  {ERR} paquete MetaTrader5 no instalado (pip install MetaTrader5)")
 except Exception as e:
     print(f"  {ERR} Excepcion: {e}")
 
@@ -153,31 +166,65 @@ try:
 except Exception as e:
     print(f"  {ERR} Excepcion: {e}")
 
-# ── 4. Alpha Vantage ─────────────────────────────────────────
-sep("4. Alpha Vantage NEWS_SENTIMENT")
+# ── 4. Notion (lectura de la DB, sin crear filas) ───────────
+sep("4. Notion (databases.retrieve)")
 try:
-    key = os.getenv("ALPHAVANTAGE_API_KEY", "")
-    if not key:
-        print(f"  {ERR} ALPHAVANTAGE_API_KEY vacia")
+    notion_token = os.getenv("NOTION_TOKEN", "")
+    notion_db_id = os.getenv("NOTION_DB_ID", "")
+    if not notion_token or not notion_db_id:
+        print(f"  {ERR} NOTION_TOKEN o NOTION_DB_ID vacias")
     else:
-        r = requests.get(
-            "https://www.alphavantage.co/query",
-            params={"function": "NEWS_SENTIMENT", "tickers": "FOREX:EUR",
-                    "topics": "forex", "limit": 3, "apikey": key},
-            timeout=12,
-        )
-        body = r.json() if r.status_code == 200 else {}
-        if "Information" in body or "Note" in body:
-            print(f"  {WRN} Limite: {body.get('Information', body.get('Note',''))[:100]}")
-        elif body.get("feed"):
-            print(f"  {OK} {len(body['feed'])} articulos recibidos")
-        else:
-            print(f"  {WRN} Sin feed: {str(body)[:150]}")
-except Exception as e:
-    print(f"  {ERR} Excepcion: {e}")
+        from notion_client import Client
+        client = Client(auth=notion_token)
+        db     = client.databases.retrieve(notion_db_id)
+        title_blocks = db.get("title", [])
+        title  = "".join(t.get("plain_text", "") for t in title_blocks) or "(sin titulo)"
+        props  = list(db.get("properties", {}).keys())
+        print(f"  {OK} DB encontrada: {title}")
+        print(f"  {OK} Propiedades ({len(props)}): {props[:8]}{' ...' if len(props) > 8 else ''}")
 
-# ── 5. Pinecone ──────────────────────────────────────────────
-sep("5. Pinecone")
+        required = [
+            "Operación", "Fecha", "Tipo", "Par",
+            "Cantidad (Lotes)", "Precio Entrada",
+            "Motivo / Análisis IA", "Estado",
+        ]
+        missing = [p for p in required if p not in props]
+        if missing:
+            print(f"  {WRN} Propiedades requeridas faltantes: {missing}")
+        else:
+            print(f"  {OK} Todas las propiedades requeridas estan presentes")
+except Exception as e:
+    print(f"  {ERR} Excepcion Notion: {e}")
+
+# ── 5. OpenAI (chat.completions.create con 5 tokens) ────────
+sep("5. OpenAI (ping de 5 tokens)")
+try:
+    openai_key = os.getenv("OPENAI_API_KEY", "")
+    if not openai_key:
+        print(f"  {ERR} OPENAI_API_KEY vacia")
+    else:
+        from openai import OpenAI
+        client = OpenAI(api_key=openai_key, timeout=15)
+        model  = os.getenv("OPENAI_MODEL", "gpt-4o")
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "Responde con la palabra: pong"},
+                {"role": "user",   "content": "ping"},
+            ],
+            max_tokens=5,
+            temperature=0,
+        )
+        content = (resp.choices[0].message.content or "").strip()
+        usage   = resp.usage
+        print(f"  {OK} Modelo {model} respondio: '{content}'")
+        if usage:
+            print(f"  {OK} Tokens prompt={usage.prompt_tokens} completion={usage.completion_tokens} total={usage.total_tokens}")
+except Exception as e:
+    print(f"  {ERR} Excepcion OpenAI: {e}")
+
+# ── 6. Pinecone ──────────────────────────────────────────────
+sep("6. Pinecone (list_indexes + describe_index_stats)")
 try:
     pc_key = os.getenv("PINECONE_API_KEY", "")
     if not pc_key:
@@ -190,7 +237,20 @@ try:
         if names:
             print(f"  {OK} Conectado | Indices: {names}")
         else:
-            print(f"  {OK} Conectado | Sin indices aun")
+            print(f"  {WRN} Conectado | Sin indices aun")
+
+        target = os.getenv("PINECONE_INDEX_NAME", "bottrading")
+        if target in names:
+            try:
+                idx   = pc.Index(target)
+                stats = idx.describe_index_stats()
+                total = stats.get("total_vector_count", "?")
+                dim   = stats.get("dimension", "?")
+                print(f"  {OK} Indice '{target}' | dimension: {dim} | vectores: {total}")
+            except Exception as e:
+                print(f"  {WRN} No se pudo leer stats de '{target}': {e}")
+        else:
+            print(f"  {WRN} Indice configurado '{target}' no existe en la cuenta")
 except Exception as e:
     print(f"  {ERR} Excepcion Pinecone: {e}")
 

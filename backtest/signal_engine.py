@@ -94,13 +94,15 @@ def get_trend(df: pd.DataFrame, sma_period: int = 50, threshold: float = 0.0010)
 # DETECCION DE PATRONES (NIVEL 4)
 # —————————————————————————————————————————————
 
+# Umbrales para validar Pin Bars como gatillo institucional.
+# Valores derivados del prompt.md WDC v2.0; calibrados por backtest.
+PIN_DOMINANT_WICK_MIN  = 0.55   # mecha "larga" debe ocupar ≥55% del rango
+PIN_BODY_MAX           = 0.35   # cuerpo ≤35% del rango (vela indecisa)
+PIN_OPPOSITE_WICK_MAX  = 0.25   # mecha contraria ≤25% (rechazo claro)
+PIN_CLOSE_IN_FAVOR     = 0.55   # cierre debe estar en el 55% favorable del rango
+
+
 def _is_pin_bar_bullish(o: float, h: float, l: float, c: float) -> bool:
-    """
-    Mecha inferior >= 55% del rango
-    Cuerpo <= 35% del rango
-    Mecha superior <= 25% del rango
-    Cierre en 55% superior
-    """
     total = h - l
     if total == 0:
         return False
@@ -108,20 +110,14 @@ def _is_pin_bar_bullish(o: float, h: float, l: float, c: float) -> bool:
     lower_wick = min(o, c) - l
     upper_wick = h - max(o, c)
     return (
-        lower_wick >= 0.55 * total
-        and body <= 0.35 * total
-        and upper_wick <= 0.25 * total
-        and c > (l + 0.55 * total)
+        lower_wick >= PIN_DOMINANT_WICK_MIN * total
+        and body <= PIN_BODY_MAX * total
+        and upper_wick <= PIN_OPPOSITE_WICK_MAX * total
+        and c > (l + PIN_CLOSE_IN_FAVOR * total)
     )
 
 
 def _is_pin_bar_bearish(o: float, h: float, l: float, c: float) -> bool:
-    """
-    Mecha superior >= 55% del rango
-    Cuerpo <= 35% del rango
-    Mecha inferior <= 25% del rango
-    Cierre en 55% inferior
-    """
     total = h - l
     if total == 0:
         return False
@@ -129,10 +125,10 @@ def _is_pin_bar_bearish(o: float, h: float, l: float, c: float) -> bool:
     upper_wick = h - max(o, c)
     lower_wick = min(o, c) - l
     return (
-        upper_wick >= 0.55 * total
-        and body <= 0.35 * total
-        and lower_wick <= 0.25 * total
-        and c < (h - 0.55 * total)
+        upper_wick >= PIN_DOMINANT_WICK_MIN * total
+        and body <= PIN_BODY_MAX * total
+        and lower_wick <= PIN_OPPOSITE_WICK_MAX * total
+        and c < (h - PIN_CLOSE_IN_FAVOR * total)
     )
 
 
@@ -217,6 +213,7 @@ def evaluate_confluence(
     news_block: bool,
     trend_threshold: float = 0.0010,
     symbol: str = "EURUSD",
+    strict: bool = False,
 ) -> Tuple[str, str, dict]:
     """
     Arbol WDC Hibrida v2.0 — 4 niveles estrictos.
@@ -237,18 +234,20 @@ def evaluate_confluence(
     sl = cfg["sl_pips"]
     tp = cfg["tp_pips"]
 
+    # NOTA: los nombres reflejan el ORDEN del prompt.md WDC v2.0:
+    #   N1 = Noticias  ·  N2 = Tendencia (H4+H1)  ·  N3 = Sentimiento Myfxbook  ·  N4 = Patrón M15
     levels = {
-        "nivel_1_noticias": "",
-        "nivel_2_sentimiento": "",
-        "nivel_3_tendencia": "",
-        "nivel_4_patron": "",
+        "nivel_1_noticias":    "",
+        "nivel_2_tendencia":   "",
+        "nivel_3_sentimiento": "",
+        "nivel_4_patron":      "",
     }
 
     # ── NIVEL 1: Noticias ──────────────────────────────────────────────────────
     if news_block:
         levels["nivel_1_noticias"] = "FALLO — evento HIGH impact"
-        levels["nivel_2_sentimiento"] = "NO EVALUADO"
-        levels["nivel_3_tendencia"] = "NO EVALUADO"
+        levels["nivel_2_tendencia"] = "NO EVALUADO"
+        levels["nivel_3_sentimiento"] = "NO EVALUADO"
         levels["nivel_4_patron"] = "NO EVALUADO"
         return "HOLD", "N1 FALLO: noticia HIGH impact", levels
 
@@ -259,19 +258,29 @@ def evaluate_confluence(
     h1_trend = get_trend(h1, threshold=trend_threshold)
 
     if h4_trend == "NEUTRAL" and h1_trend == "NEUTRAL":
-        levels["nivel_2_sentimiento"] = "FALLO — H4=NEUTRAL H1=NEUTRAL, sin tendencia clara"
-        levels["nivel_3_tendencia"] = "NO EVALUADO"
+        levels["nivel_2_tendencia"] = "FALLO — H4=NEUTRAL H1=NEUTRAL, sin tendencia clara"
+        levels["nivel_3_sentimiento"] = "NO EVALUADO"
         levels["nivel_4_patron"] = "NO EVALUADO"
         return "HOLD", "N2 FALLO: H4 y H1 neutrales, sin direccion", levels
 
     if h4_trend != "NEUTRAL" and h1_trend != "NEUTRAL" and h4_trend != h1_trend:
-        levels["nivel_2_sentimiento"] = f"FALLO — H4={h4_trend} vs H1={h1_trend} en conflicto"
-        levels["nivel_3_tendencia"] = "NO EVALUADO"
+        levels["nivel_2_tendencia"] = f"FALLO — H4={h4_trend} vs H1={h1_trend} en conflicto"
+        levels["nivel_3_sentimiento"] = "NO EVALUADO"
         levels["nivel_4_patron"] = "NO EVALUADO"
         return "HOLD", f"N2 FALLO: H4={h4_trend} contradice H1={h1_trend}", levels
 
+    # P1 (modo strict): rechazar si H4 o H1 son NEUTRAL — pide unanimidad fuerte.
+    # Bot live mantiene el comportamiento permisivo (strict=False default).
+    if strict and (h4_trend == "NEUTRAL" or h1_trend == "NEUTRAL"):
+        levels["nivel_2_tendencia"] = (
+            f"FALLO (strict) — H4={h4_trend} H1={h1_trend}, se requiere ambos no NEUTRAL"
+        )
+        levels["nivel_3_sentimiento"] = "NO EVALUADO"
+        levels["nivel_4_patron"] = "NO EVALUADO"
+        return "HOLD", "N2 FALLO strict: tendencia no unánime entre H4 y H1", levels
+
     bias = h4_trend if h4_trend != "NEUTRAL" else h1_trend
-    levels["nivel_2_sentimiento"] = f"OK — H4={h4_trend} H1={h1_trend} → bias={bias}"
+    levels["nivel_2_tendencia"] = f"OK — H4={h4_trend} H1={h1_trend} → bias={bias}"
 
     # ── NIVEL 3: Sentimiento confirma la tendencia ─────────────────────────────
     short_pct = sentiment["short_pct"]
@@ -279,23 +288,23 @@ def evaluate_confluence(
 
     if bias == "SELL":
         if long_pct >= 60:
-            levels["nivel_3_tendencia"] = (
+            levels["nivel_3_sentimiento"] = (
                 f"OK — {long_pct:.0f}% retail long (masa atrapada comprando, confirma SELL)"
             )
         elif short_pct >= 60:
-            levels["nivel_3_tendencia"] = (
+            levels["nivel_3_sentimiento"] = (
                 f"FALLO — {short_pct:.0f}% retail short (masa en tu misma direccion, riesgo squeeze)"
             )
             levels["nivel_4_patron"] = "NO EVALUADO"
             return "HOLD", f"N3 FALLO: masa vende {short_pct:.0f}% con tendencia SELL — riesgo squeeze", levels
         else:
             if h4_trend == "SELL" and h1_trend == "SELL":
-                levels["nivel_3_tendencia"] = (
+                levels["nivel_3_sentimiento"] = (
                     f"OK (neutro) — sentimiento {long_pct:.0f}%L/{short_pct:.0f}%S, "
                     f"H4+H1 unanimes SELL"
                 )
             else:
-                levels["nivel_3_tendencia"] = (
+                levels["nivel_3_sentimiento"] = (
                     f"FALLO — sentimiento neutro ({long_pct:.0f}%L/{short_pct:.0f}%S) "
                     f"y tendencia no unanime"
                 )
@@ -304,23 +313,23 @@ def evaluate_confluence(
 
     elif bias == "BUY":
         if short_pct >= 60:
-            levels["nivel_3_tendencia"] = (
+            levels["nivel_3_sentimiento"] = (
                 f"OK — {short_pct:.0f}% retail short (masa atrapada vendiendo, confirma BUY)"
             )
         elif long_pct >= 60:
-            levels["nivel_3_tendencia"] = (
+            levels["nivel_3_sentimiento"] = (
                 f"FALLO — {long_pct:.0f}% retail long (masa en tu misma direccion, riesgo)"
             )
             levels["nivel_4_patron"] = "NO EVALUADO"
             return "HOLD", f"N3 FALLO: masa compra {long_pct:.0f}% con tendencia BUY — riesgo", levels
         else:
             if h4_trend == "BUY" and h1_trend == "BUY":
-                levels["nivel_3_tendencia"] = (
+                levels["nivel_3_sentimiento"] = (
                     f"OK (neutro) — sentimiento {long_pct:.0f}%L/{short_pct:.0f}%S, "
                     f"H4+H1 unanimes BUY"
                 )
             else:
-                levels["nivel_3_tendencia"] = (
+                levels["nivel_3_sentimiento"] = (
                     f"FALLO — sentimiento neutro ({long_pct:.0f}%L/{short_pct:.0f}%S) "
                     f"y tendencia no unanime"
                 )
@@ -336,8 +345,8 @@ def evaluate_confluence(
     levels["nivel_4_patron"] = f"OK — {pattern}"
     reason = (
         f"{levels['nivel_1_noticias']}. "
-        f"N2 {levels['nivel_2_sentimiento']}. "
-        f"N3 {levels['nivel_3_tendencia']}. "
+        f"N2 {levels['nivel_2_tendencia']}. "
+        f"N3 {levels['nivel_3_sentimiento']}. "
         f"N4 OK: {pattern}. "
         f"→ {bias} | SL={sl}p TP={tp}p"
     )

@@ -514,11 +514,11 @@ def _build_trades_table(trades_df: pd.DataFrame) -> str:
         exit_p    = row.get("exit_price", 0.0)
         cap_after = row.get("capital_after", 0.0)
 
-        # Criterios de confluencia (4 niveles)
+        # Criterios de confluencia (4 niveles, ORDEN del prompt.md WDC v2.0)
         n1 = row.get("nivel_1", False)  # Noticias
-        n2 = row.get("nivel_2", False)  # Sentimiento
-        n3 = row.get("nivel_3", False)  # Tendencia H4/H1
-        n4 = row.get("nivel_4", False)  # Patron M15
+        n2 = row.get("nivel_2", False)  # Tendencia H4/H1
+        n3 = row.get("nivel_3", False)  # Sentimiento Myfxbook
+        n4 = row.get("nivel_4", False)  # Patrón M15
         reason = row.get("reason", "—")
         sentiment = row.get("sentiment_short", 0.0)
         av_score  = row.get("av_score", 0.0)

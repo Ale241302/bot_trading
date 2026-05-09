@@ -12,9 +12,13 @@ semántica por similitud coseno es suficiente para el bot.
 ================================================
 """
 
+import logging
 import os
 from datetime import datetime, timezone
+
 from pinecone import Pinecone
+
+logger = logging.getLogger(__name__)
 
 
 class PineconeMemory:
@@ -40,7 +44,7 @@ class PineconeMemory:
 
         self.pc    = Pinecone(api_key=api_key)
         self.index = self.pc.Index(index_name)
-        print(f"Pinecone: conectado al índice '{index_name}' (llama-text-embed-v2).")
+        logger.info(f"Pinecone: conectado al índice '{index_name}' (llama-text-embed-v2).")
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -132,7 +136,7 @@ class PineconeMemory:
                 }
             ],
         )
-        print(f"Pinecone: operación guardada -> {vector_id}")
+        logger.info(f"Pinecone: operación guardada -> {vector_id}")
         return vector_id
 
     # ── Lectura ───────────────────────────────────────────────────────────────

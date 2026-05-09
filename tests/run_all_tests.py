@@ -19,8 +19,16 @@ BOLD   = "\033[1m"
 RESET  = "\033[0m"
 
 tests = [
-    ("Notion Connection",    "tests/test_notion_connection.py"),
-    ("MetaTrader 5",         "tests/test_mt5_connection.py"),
+    # Unit tests (puros — corren en cualquier entorno)
+    ("Unit: signal_engine",  "tests/test_signal_engine.py"),
+    ("Unit: capital_guard",  "tests/test_capital_guard.py"),
+    ("Unit: trader+ai",      "tests/test_trader_unit.py"),
+
+    # Integración (requieren credenciales y red)
+    ("Integration: Myfxbook",        "tests/test_myfxbook.py"),
+    ("Integration: Notion",          "tests/test_notion_connection.py"),
+    ("Integration: Notion+Pinecone", "tests/test_notion_pinecone_integration.py"),
+    ("Integration: MetaTrader 5",    "tests/test_mt5_connection.py"),
 ]
 
 print(f"\n{BOLD}================================================{RESET}")

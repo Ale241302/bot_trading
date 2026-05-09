@@ -1,20 +1,36 @@
-# Entorno virtual
+# ── Credenciales y secretos ────────────────────────
+# NO subir NUNCA estos archivos (rota las claves si se filtra alguno).
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+credentials.json
+.secrets.json
+
+# ── Entorno virtual ────────────────────────────────
 venv/
+.venv/
 __pycache__/
 *.pyc
 *.pyo
 
-# Logs locales
+# ── Logs locales ───────────────────────────────────
 logs/
 *.log
 
-# Docker
+# ── Docker ─────────────────────────────────────────
 .docker/
 
-# IDEs
+# ── IDEs ───────────────────────────────────────────
 .vscode/
 .idea/
 
-# Estado local WDC
+# ── Estado local del bot (puede contener trades reales) ─
 capital_state.json
+active_trades.json
+*.tmp
+
+# ── Backtest cache (contiene datos descargados) ────
+backtest/output/data_cache_*.pkl

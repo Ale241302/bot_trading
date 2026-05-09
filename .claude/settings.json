@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c ' *)",
+      "Bash(python -m py_compile main.py modules/logging_config.py modules/trader.py modules/mt5_connector.py modules/ai_analyst.py modules/trade_monitor.py modules/capital_guard.py modules/notion_logger.py modules/pinecone_memory.py modules/market_context.py modules/myfxbook_client.py backtest/backtest_runner.py scripts/check_env.py)",
+      "Bash(grep -E '\\\\.env$')",
+      "Bash(python tests/test_signal_engine.py)",
+      "Bash(python tests/test_capital_guard.py)",
+      "Bash(python tests/test_trader_unit.py)"
+    ]
+  }
+}

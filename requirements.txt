@@ -1,26 +1,24 @@
 # ───────────────────────────────────────────────────────────────
-# requirements.txt  →  dependencias COMUNES (Docker / Linux / Windows)
-# MetaTrader5 NO se incluye aquí porque solo existe para Windows.
-# En Windows instala manualmente: pip install MetaTrader5==5.0.5640
+# requirements.txt  →  dependencias del bot LIVE (Docker / Linux / Windows)
+# Versiones PINEADAS para reproducibilidad — actualiza intencionalmente.
+# MetaTrader5 NO se incluye aquí (solo existe para Windows: ver requirements-windows.txt).
 # ───────────────────────────────────────────────────────────────
 
-# IA - OpenAI
-openai>=1.30.1
+# IA — OpenAI
+openai==2.36.0
 
-# Notion - Log de operaciones
+# Notion — Log de operaciones
 notion-client==2.2.1
 
-# Pinecone - Memoria vectorial
-pinecone>=3.2.2
+# Pinecone — Memoria vectorial (índice integrado llama-text-embed-v2)
+pinecone==9.0.0
 
 # Contexto externo de mercado
-yfinance>=0.2.54            # velas históricas EURUSD gratis (reemplaza Finnhub candles)
-finnhub-python>=2.4.20      # se mantiene por compatibilidad (solo usado como fallback)
-jb-news>=2.2.4              # pip install jb-news  (calendario económico jblanked)
+yfinance==1.3.0
 
 # Utilidades
 python-dotenv==1.0.1
-pandas>=2.2.2
-numpy>=1.26.4
+pandas==3.0.2
+numpy==2.4.4
 schedule==1.2.2
-requests>=2.31.0
+requests==2.33.1

@@ -1,6 +1,11 @@
 import json
+import logging
 import os
+
 import MetaTrader5 as mt5
+
+logger = logging.getLogger(__name__)
+
 
 class TradeMonitor:
     def __init__(self, memory, notion):
@@ -10,18 +15,33 @@ class TradeMonitor:
         self._load_active_trades()
 
     def _load_active_trades(self):
-        if os.path.exists(self.filepath):
+        if not os.path.exists(self.filepath):
+            self.active_trades = {}
+            return
+
+        try:
+            with open(self.filepath, "r") as f:
+                self.active_trades = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            # JSON corrupto: hacemos backup para auditoría y empezamos con estado vacío.
+            backup = self.filepath + ".corrupt"
             try:
-                with open(self.filepath, 'r') as f:
-                    self.active_trades = json.load(f)
-            except Exception:
-                self.active_trades = {}
-        else:
+                os.replace(self.filepath, backup)
+                logger.error(
+                    f"active_trades.json corrupto ({e}). "
+                    f"Backup en {backup}. Continuando con estado vacío."
+                )
+            except OSError:
+                logger.exception(f"No pude hacer backup de {self.filepath} corrupto")
             self.active_trades = {}
 
     def _save_active_trades(self):
-        with open(self.filepath, 'w') as f:
+        tmp = self.filepath + ".tmp"
+        with open(tmp, "w") as f:
             json.dump(self.active_trades, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, self.filepath)
 
     def add_trade(self, ticket: int, symbol: str, notion_page_id: str, action: str, lot_size: float, price_open: float, reason: str):
         self.active_trades[str(ticket)] = {
@@ -51,14 +71,14 @@ class TradeMonitor:
                 profit = 0.0
 
                 if not deals or len(deals) == 0:
-                    print(f"Monitor: Sin deals aún para ticket {ticket}, reintentando próximo ciclo.")
+                    logger.debug(f"Sin deals aún para ticket {ticket}, reintentando próximo ciclo.")
                     continue  # No marcar como cerrado todavía
-                    
+
                 profit = sum([d.profit for d in deals])
                 price_close = deals[-1].price
 
                 # Actualizar Notion y Pinecone
-                print(f"Monitor: Operación cerrada {ticket}. Actualizando DBs...")
+                logger.info(f"Operación cerrada {ticket} (PnL ${profit:.2f}) — actualizando Notion + Pinecone")
                 
                 if data.get("notion_page_id"):
                     self.notion.update_operation(data["notion_page_id"], price_close, profit)

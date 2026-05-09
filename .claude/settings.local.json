@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m py_compile scripts/check_env.py)",
+      "Bash(python -m py_compile modules/trader.py modules/mt5_connector.py modules/trade_monitor.py modules/capital_guard.py modules/ai_analyst.py)",
+      "Bash(python -c \"from modules.capital_guard import CapitalGuard, SL_PIPS, TP_PIPS, RISK_PCT, MAX_TRADES_PER_DAY, MAX_SL_WEEK; print\\('SL_PIPS module:', SL_PIPS\\); print\\('SL_PIPS class :', CapitalGuard.SL_PIPS\\); print\\('RISK_PCT:', RISK_PCT\\); print\\('MAX_SL_WEEK:', MAX_SL_WEEK\\)\")",
+      "Bash(python -c \"from backtest.backtest_runner import RISK_PCT, MAX_TRADES_PER_DAY, MAX_SL_WEEK, NEWS_PROB; print\\('RISK_PCT:', RISK_PCT\\); print\\('MAX_TRADES_PER_DAY:', MAX_TRADES_PER_DAY\\); print\\('MAX_SL_WEEK:', MAX_SL_WEEK\\); print\\('NEWS_PROB:', NEWS_PROB\\)\")"
+    ]
+  }
+}

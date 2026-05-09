@@ -24,32 +24,66 @@ Version WDC SWEET SPOT — Confirmado por Monte Carlo:
 ================================================
 """
 
-from datetime import datetime, timezone, timedelta
-import math
 import json
+import logging
+import math
 import os
+from datetime import datetime, timezone, timedelta
 
-# -- Horario operativo Colombia (UTC-5) ------------------------------------
+logger = logging.getLogger(__name__)
+
+# ──────────────────────────────────────────────────────────────────────
+# CONSTANTES DE GESTIÓN — fuente única de verdad
+# Importar desde aquí (también desde backtest/) para evitar duplicación.
+# ──────────────────────────────────────────────────────────────────────
+
+# Horario operativo Colombia (UTC-5)
 TRADE_HOUR_START_UTC = 7    # 02:00 AM Colombia
 TRADE_HOUR_END_UTC   = 16   # 11:00 AM Colombia
 
+# SL/TP fijos (pips) — Configuración WDC original RR 1:2
+SL_PIPS = 8.0
+TP_PIPS = 16.0
+
+# Riesgos por fase (Sweet Spot confirmado por Monte Carlo)
+RIESGO_CRECIMIENTO   = 0.05   # 5% — 90.1% duplican, 2% ruina
+RIESGO_CONSOLIDACION = 0.03   # 3% — frenado táctico
+RIESGO_ESCUDO        = 0.01   # 1% — protección máxima
+
+# Stop-loss diario y racha máxima de SL antes de pausar
+MAX_DAILY_LOSS_PCT = 0.20   # 20% del capital → corta el día
+MAX_CONSECUTIVE_SL = 3      # 3 SL seguidos → pausa por hoy
+MAX_SL_WEEK        = 5      # 5 SL en 7 días → pausa la semana
+
+# Límites de operaciones simultáneas y diarias (por fase / global)
+MAX_TRADES_SIMULTANEOUS = {
+    "CRECIMIENTO":   1,
+    "CONSOLIDACION": 1,
+    "ESCUDO":        1,
+}
+MAX_TRADES_PER_DAY = 3
+
+# Mapa de riesgo por fase (consumible por backtest y CapitalGuard)
+RISK_PCT = {
+    "CRECIMIENTO":   RIESGO_CRECIMIENTO,
+    "CONSOLIDACION": RIESGO_CONSOLIDACION,
+    "ESCUDO":        RIESGO_ESCUDO,
+}
+
 
 class CapitalGuard:
-    # SL y TP fijos para todas las fases (en pips)
-    # Configuración original WDC: RR 1:2
-    SL_PIPS = 8.0
-    TP_PIPS = 16.0
+    SL_PIPS              = SL_PIPS
+    TP_PIPS              = TP_PIPS
+    RIESGO_CRECIMIENTO   = RIESGO_CRECIMIENTO
+    RIESGO_CONSOLIDACION = RIESGO_CONSOLIDACION
+    RIESGO_ESCUDO        = RIESGO_ESCUDO
+    MAX_DAILY_LOSS_PCT   = MAX_DAILY_LOSS_PCT
+    MAX_CONSECUTIVE_SL   = MAX_CONSECUTIVE_SL
+    MAX_SL_WEEK          = MAX_SL_WEEK
 
-    # -- Riesgos por fase (Sweet Spot confirmado por MC) -------------------
-    RIESGO_CRECIMIENTO   = 0.05   # 5%  <- Sweet Spot: 90.1% duplican, 2% ruina
-    RIESGO_CONSOLIDACION = 0.03   # 3%  <- frenado tactico
-    RIESGO_ESCUDO        = 0.01   # 1%  <- proteccion maxima
-
-    # -- Stop-loss diario: 3 SL al 5% = -15% capital (conservador)
-    MAX_DAILY_LOSS_PCT   = 0.20   # 20% del capital -> corta el dia
-
-    # -- Racha maxima de SL consecutivos antes de pausar
-    MAX_CONSECUTIVE_SL   = 3     # 3 SL seguidos = pausa por hoy
+    # Umbrales de fase (% del objetivo diario)
+    DAILY_TARGET_PCT      = 0.20   # +20% del capital base = meta diaria
+    CONSOLIDATION_PROGRESS = 0.50  # >=50% de la meta → fase Consolidación
 
     def __init__(self):
         self._file_path = "capital_state.json"
@@ -75,16 +109,20 @@ class CapitalGuard:
                 if datetime.fromisoformat(d["ts"]) >= threshold
             ]
         except Exception as e:
-            print(f"Error cargando estado de capital: {e}")
+            logger.error(f"Error cargando estado de capital: {e}")
             return []
 
     def _save_state(self):
         try:
             data = [{"pnl": o["pnl"], "ts": o["ts"].isoformat()} for o in self._operations]
-            with open(self._file_path, "w") as f:
+            tmp = self._file_path + ".tmp"
+            with open(tmp, "w") as f:
                 json.dump(data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self._file_path)
         except Exception as e:
-            print(f"Error guardando estado: {e}")
+            logger.error(f"Error guardando estado: {e}")
 
     def record(self, pnl: float):
         self._operations.append({"pnl": pnl, "ts": self._now()})
@@ -112,6 +150,11 @@ class CapitalGuard:
             else:
                 break
         return streak
+
+    def _sl_count_last_7_days(self) -> int:
+        """Total de SL (operaciones con PnL<0) en los últimos 7 días."""
+        threshold = self._now() - timedelta(days=7)
+        return sum(1 for op in self._operations if op["ts"] >= threshold and op["pnl"] < 0)
 
     def _get_base_and_target(self, capital_activo: float):
         bases = [50, 100, 200, 400, 800, 1600, 3200, 6400, 12800]
@@ -141,19 +184,27 @@ class CapitalGuard:
         if p_day <= -max_daily_loss:
             return False, f"Max loss diario alcanzado (${-p_day:.2f} / limite ${max_daily_loss:.2f})"
 
-        # 4) Racha de SL consecutivos
+        # 4) Racha de SL consecutivos (CB diario)
         sl_streak = self._consecutive_sl_today()
         if sl_streak >= self.MAX_CONSECUTIVE_SL:
             return False, f"Racha {sl_streak} SL consecutivos — pausa por hoy (max {self.MAX_CONSECUTIVE_SL})"
+
+        # 5) CB semanal: 5 SL en 7 días → pausa la semana
+        sl_week = self._sl_count_last_7_days()
+        if sl_week >= self.MAX_SL_WEEK:
+            return False, (
+                f"Circuit breaker semanal: {sl_week} SL en últimos 7 días "
+                f"(max {self.MAX_SL_WEEK}) — pausa semanal hasta el lunes"
+            )
 
         return True, "OK — dentro de horario y limites"
 
     def get_phase(self, capital_activo: float) -> tuple[str, float]:
         """
-        Fases segun PnL del dia vs objetivo diario (+20% = duplicar en 5 dias).
+        Fases segun PnL del dia vs objetivo diario (DAILY_TARGET_PCT del capital base).
         """
         base, _      = self._get_base_and_target(capital_activo)
-        daily_target = base * 0.20
+        daily_target = base * self.DAILY_TARGET_PCT
         p_day        = self.pnl_day()
         now          = self._now()
 
@@ -163,14 +214,14 @@ class CapitalGuard:
         if p_day >= daily_target:
             return "ESCUDO", self.RIESGO_ESCUDO
 
-        if p_day >= daily_target * 0.50:
+        if p_day >= daily_target * self.CONSOLIDATION_PROGRESS:
             return "CONSOLIDACION", self.RIESGO_CONSOLIDACION
 
         return "CRECIMIENTO", self.RIESGO_CRECIMIENTO
 
     def status_text(self, capital_activo: float) -> str:
         base, target      = self._get_base_and_target(capital_activo)
-        daily_target      = base * 0.20
+        daily_target      = base * self.DAILY_TARGET_PCT
         p_day             = self.pnl_day()
         p_week            = self.pnl_week()
         phase, riesgo     = self.get_phase(capital_activo)
